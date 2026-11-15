@@ -249,3 +249,26 @@ def test_prompt_lists_existing_tasks_and_the_owners_day(owner):
     text = Agent._describe_request(owner, "goal")
     assert "Feeding: 10 min, high, daily at 8:00 AM" in text
     assert "ends at 10:00 PM" in text and "9:00 AM-5:00 PM" in text
+
+
+def test_tasks_closer_than_the_buffer_are_sent_back(owner):
+    owner.preferences.buffer_minutes = 5
+    tight = reply(("Mia", "Feeding", 15, "high", "daily", "08:00"), ("Mia", "Play", 15, "low", "daily", "08:17"))  # 2 min gap
+    fixed = reply(("Mia", "Feeding", 15, "high", "daily", "08:00"), ("Mia", "Play", 15, "low", "daily", "08:20"))  # 5 min gap
+    llm = FakeLLM(tight, fixed)
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.success and result.attempts == 2
+    assert "at least 5 minutes between tasks" in llm.calls[1][-1]["content"]
+
+
+def test_buffer_is_not_enforced_when_zero(owner):
+    back_to_back = reply(("Mia", "Feeding", 15, "high", "daily", "08:00"), ("Mia", "Play", 15, "low", "daily", "08:15"))
+    assert PlannerAgent(FakeLLM(back_to_back)).run(owner, "plan").attempts == 1
+
+
+def test_context_mentions_the_buffer_only_when_set(owner):
+    from pawpal_agent import describe_context
+
+    assert "between tasks" not in describe_context(owner)
+    owner.preferences.buffer_minutes = 5
+    assert "Leave at least 5 minute(s) between tasks" in describe_context(owner)

@@ -26,6 +26,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Protocol
 
 from pawpal_system import Frequency, Owner, Priority, Scheduler, Task, format_time
@@ -55,6 +56,8 @@ Rules:
   preferred_time to preferred_time + duration_minutes).
 - Do not repeat a task the pet already has (same title and same time). Two feedings at
   different times are fine and are not duplicates.
+- If the owner wants minutes between tasks, leave at least that gap between one task
+  ending and the next starting.
 - Respect the owner's day: never set a preferred_time during a busy block or outside
   the day start/end you are given.
 - If you are told about problems with your previous attempt, fix them and
@@ -349,10 +352,11 @@ def describe_context(owner: Owner) -> str:
     if owner.busy_blocks:
         blocks = ", ".join(f"{format_time(a)}-{format_time(b)}" for a, b in owner.busy_blocks)
         busy = f" The owner is busy (no tasks possible) during: {blocks}."
+    buffer = owner.preferences.buffer_minutes
+    gap = f" Leave at least {buffer} minute(s) between tasks." if buffer else ""
     return (
         "Pets:\n" + "\n".join(pet_lines) + "\n\n"
-        f"Owner has {owner.available_minutes} minutes available per day, {day}, "
-        f"and wants {owner.preferences.buffer_minutes} minute(s) between tasks.{busy}"
+        f"Owner has {owner.available_minutes} minutes available per day and {day}.{gap}{busy}"
     )
 
 
@@ -513,6 +517,22 @@ class PlannerAgent:
 
         scheduler = Scheduler(trial)
         problems = [c for c in scheduler.detect_conflicts() if c not in baseline]
+        new_ids = {task.id for task in new_tasks}
+
+        # Tasks that don't overlap but sit closer together than the owner's buffer.
+        buffer = owner.preferences.buffer_minutes
+        if buffer > 0:
+            timed = sorted(
+                (t for t in trial.get_all_tasks() if t.preferred_time is not None and scheduler._is_pending(t, date.today())),
+                key=lambda t: t.preferred_time,
+            )
+            for first, second in zip(timed, timed[1:]):
+                gap = second.preferred_time - first.preferred_end
+                if 0 <= gap < buffer and (first.id in new_ids or second.id in new_ids):
+                    problems.append(
+                        f"'{first.title}' ends at {format_time(first.preferred_end)} and '{second.title}' starts at "
+                        f"{format_time(second.preferred_time)}: leave at least {buffer} minutes between tasks"
+                    )
 
         for spec in specs:
             if spec.preferred_time is None:
@@ -530,7 +550,6 @@ class PlannerAgent:
                 problems.append(f"{label} runs past the day end at {format_time(owner.day_end_minute)}")
 
         plan = scheduler.generate_plan()
-        new_ids = {task.id for task in new_tasks}
         for skipped in plan.skipped_items:
             if skipped.task.id in new_ids:
                 problems.append(

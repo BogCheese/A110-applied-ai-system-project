@@ -172,3 +172,8 @@ def test_planner_shows_the_user_what_the_ai_is_told(app):
     shown = "\n".join(t.value for t in app.text)
     assert "ends at 9:00 PM" in shown and "9:00 AM-5:00 PM" in shown and "Nala (cat)" in shown
     assert shown == describe_context(app.session_state.owner)  # identical to what the model receives
+
+
+def test_owner_starts_with_a_five_minute_buffer(app):
+    assert app.session_state.owner.preferences.buffer_minutes == 5
+    assert any("Leave at least 5 minute(s) between tasks" in t.value for t in app.text)

@@ -3,11 +3,14 @@ import streamlit as st
 from datetime import date
 
 from pawpal_agent import AgentError, PlannerAgent, describe_context, make_client, setup_logging
-from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task, format_time
+from pawpal_system import Frequency, Owner, Pet, Preferences, Priority, Scheduler, Task, format_time
 
 setup_logging()
 
 # Starter task titles, so the form suggests something that makes sense for the pet.
+# Gap left between consecutive tasks (travel, cleanup, a breather). Not user-editable.
+BUFFER_MINUTES = 5
+
 DEFAULT_TASK_TITLES = {"dog": "Morning walk", "cat": "Feed breakfast"}
 
 
@@ -39,7 +42,9 @@ st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 # would be recreated empty each time. st.session_state is a dictionary that survives
 # re-runs, so we only create the Owner the first time and reuse it afterwards.
 if "owner" not in st.session_state:
-    st.session_state.owner = Owner(name="Jordan", available_minutes=120)
+    st.session_state.owner = Owner(
+        name="Jordan", available_minutes=120, preferences=Preferences(buffer_minutes=BUFFER_MINUTES)
+    )
 
 st.title("🐾 PawPal+")
 
