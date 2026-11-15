@@ -106,16 +106,40 @@ def test_busy_time_can_be_added_and_removed(app):
     assert app.session_state.owner.busy_blocks == []
 
 
-def test_day_start_and_end_update_the_owner(app):
-    from datetime import time
+def pick(at, label, text):
+    """Choose a dropdown option by the text the user sees (e.g. '8:30 AM')."""
+    [box for box in at.selectbox if box.label == label][0].select_index(
+        [box for box in at.selectbox if box.label == label][0].options.index(text)
+    )
+    return at.run()
 
-    [t for t in app.time_input if t.label == "Day starts at"][0].set_value(time(9, 30))
-    [c for c in app.checkbox if c.label == "Set a day end time"][0].check()
-    app.run()
-    [t for t in app.time_input if t.label == "Day ends at"][0].set_value(time(20, 0))
-    app.run()
+
+def test_day_start_and_end_update_the_owner(app):
+    pick(app, "Day starts at", "9:30 AM")
+    pick(app, "Day ends at (optional)", "8:00 PM")
     owner = app.session_state.owner
     assert (owner.day_start_minute, owner.day_end_minute) == (9 * 60 + 30, 20 * 60)
+    pick(app, "Day ends at (optional)", "No end time")
+    assert app.session_state.owner.day_end_minute is None
+
+
+def test_end_before_start_is_rejected_with_a_warning(app):
+    pick(app, "Day ends at (optional)", "7:00 AM")  # the day starts at 8:00 AM by default
+    assert app.session_state.owner.day_end_minute is None
+    assert any("must end after it starts" in w.value for w in app.warning)
+
+
+def test_all_times_are_shown_in_standard_time(app):
+    options = [box for box in app.selectbox if box.label == "Day starts at"][0].options
+    assert "8:00 AM" in options and "1:05 PM" in options and "12:00 AM" in options
+    assert not any(option.startswith(("13:", "20:")) for option in options)
+    assert not app.time_input  # no 24-hour time boxes left on the page
+
+
+def test_preferred_time_dropdown_sets_task_time(app):
+    pick(app, "Preferred time", "6:15 PM")
+    click(app, "Add task")
+    assert app.session_state.owner.pets[0].tasks[0].preferred_time == 18 * 60 + 15
 
 
 def test_task_table_has_due_column(app):

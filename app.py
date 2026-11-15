@@ -1,6 +1,6 @@
 import streamlit as st
 
-from datetime import date, time
+from datetime import date
 
 from pawpal_agent import AgentError, PlannerAgent, make_client, setup_logging
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task, format_time
@@ -11,14 +11,26 @@ setup_logging()
 DEFAULT_TASK_TITLES = {"dog": "Morning walk", "cat": "Feed breakfast"}
 
 
-def to_minutes(value: time) -> int:
-    """A time-picker value as minutes since midnight (what the scheduler uses)."""
-    return value.hour * 60 + value.minute
+def time_picker(label: str, value: int | None, key: str, none_label: str | None = None) -> int | None:
+    """A dropdown of times in standard (12-hour) format, e.g. '8:00 AM'. Returns minutes since midnight.
 
-
-def to_time(minutes: int) -> time:
-    """Minutes since midnight as a time-picker value."""
-    return time(minutes // 60, minutes % 60)
+    Streamlit's own time box follows the browser's clock settings and often shows 24-hour
+    time, so a dropdown is used to keep every time in the same readable format. Times
+    step by 5 minutes; a value that isn't on a step (e.g. from the AI) is added so it
+    still shows correctly. Pass none_label (e.g. "No end time") to allow "no value".
+    """
+    options = list(range(0, 24 * 60, 5))
+    if value is not None and value not in options:
+        options = sorted(options + [value])
+    if none_label is not None:
+        options = [None] + options
+    return st.selectbox(
+        label,
+        options,
+        index=options.index(value),
+        format_func=lambda minute: none_label if minute is None else format_time(minute),
+        key=key,
+    )
 
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -62,31 +74,27 @@ owner.available_minutes = int(
 
 start_col, end_col = st.columns(2)
 with start_col:
-    owner.day_start_minute = to_minutes(st.time_input("Day starts at", value=to_time(owner.day_start_minute), key="day_start"))
+    owner.day_start_minute = time_picker("Day starts at", owner.day_start_minute, key="day_start")
 with end_col:
-    use_day_end = st.checkbox("Set a day end time", value=owner.day_end_minute is not None, key="use_day_end")
-    if use_day_end:
-        day_end = to_minutes(st.time_input("Day ends at", value=to_time(owner.day_end_minute or 21 * 60), key="day_end"))
-        if day_end > owner.day_start_minute:
-            owner.day_end_minute = day_end
-        else:
-            owner.day_end_minute = None
-            st.warning("The day must end after it starts.")
-    else:
-        owner.day_end_minute = None
+    day_end = time_picker("Day ends at (optional)", owner.day_end_minute, key="day_end", none_label="No end time")
+if day_end is not None and day_end <= owner.day_start_minute:
+    owner.day_end_minute = None
+    st.warning("The day must end after it starts.")
+else:
+    owner.day_end_minute = day_end
 
 with st.expander("Busy times (optional), e.g. work 9 AM - 5 PM", expanded=bool(owner.busy_blocks)):
     st.caption("No tasks are scheduled during a busy time, and the AI planner avoids them too.")
     with st.form("add_busy_form"):
         busy_start_col, busy_end_col = st.columns(2)
         with busy_start_col:
-            busy_start = st.time_input("Busy from", value=time(9, 0))
+            busy_start = time_picker("Busy from", 9 * 60, key="busy_start")
         with busy_end_col:
-            busy_end = st.time_input("Busy until", value=time(17, 0))
+            busy_end = time_picker("Busy until", 17 * 60, key="busy_end")
         add_busy_clicked = st.form_submit_button("Add busy time")
     if add_busy_clicked:
         try:
-            owner.add_busy_block(to_minutes(busy_start), to_minutes(busy_end))
+            owner.add_busy_block(busy_start, busy_end)
         except ValueError as error:
             st.warning(str(error))
     for block in list(owner.busy_blocks):
@@ -150,11 +158,7 @@ else:
             "Frequency", list(Frequency), format_func=lambda f: f.value.title()
         )
 
-    # The scheduler stores times as minutes since midnight, so convert the time picker.
-    preferred_time = None
-    if st.checkbox("Set a preferred time"):
-        chosen_time = st.time_input("Preferred time", value=time(8, 0))
-        preferred_time = chosen_time.hour * 60 + chosen_time.minute
+    preferred_time = time_picker("Preferred time", None, key="task_time", none_label="Any time")
 
     if st.button("Add task"):
         # Pet.add_task stores the Task on the selected pet (and records the pet's name on it).
@@ -259,8 +263,9 @@ if owner.get_all_tasks():
                 index=list(Frequency).index(edit_task.frequency),
                 format_func=lambda f: f.value.title(),
             )
-            has_time = st.checkbox("Has a preferred time", value=edit_task.preferred_time is not None)
-            new_time = st.time_input("Preferred time", value=to_time(edit_task.preferred_time or 8 * 60))
+            new_time = time_picker(
+                "Preferred time", edit_task.preferred_time, key=f"edit_time_{edit_task.id}", none_label="Any time"
+            )
             save_clicked = st.form_submit_button("Save changes")
             delete_clicked = st.form_submit_button("Delete task")
 
@@ -271,7 +276,7 @@ if owner.get_all_tasks():
                 duration_minutes=int(new_duration),
                 priority=new_priority,
                 frequency=new_frequency,
-                preferred_time=to_minutes(new_time) if has_time else None,
+                preferred_time=new_time,
             )
             st.rerun()
         if delete_clicked:
