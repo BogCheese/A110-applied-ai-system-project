@@ -32,7 +32,7 @@ from pawpal_system import Frequency, Owner, Priority, Scheduler, Task, format_ti
 logger = logging.getLogger("pawpal.agent")
 
 DEFAULT_MODEL = "claude-haiku-5-5"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 MAX_TASKS_PER_RUN = 30
 MAX_DURATION_MINUTES = 240
 
@@ -153,9 +153,13 @@ class GeminiClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.load(response)
         except urllib.error.HTTPError as exc:
-            logger.error("Gemini API returned HTTP %s", exc.code)
-            hint = " (rate limit: wait a minute and retry)" if exc.code == 429 else ""
-            raise AgentError(f"The AI service returned an error (HTTP {exc.code}){hint}.") from exc
+            try:
+                detail = json.loads(exc.read())["error"]["message"][:200]
+            except Exception:
+                detail = ""
+            logger.error("Gemini API returned HTTP %s: %s", exc.code, detail)
+            hint = " Rate limit: wait a minute and retry." if exc.code == 429 else ""
+            raise AgentError(f"The AI service returned an error (HTTP {exc.code}): {detail}{hint}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             logger.error("Gemini API call failed: %s", exc)
             raise AgentError(f"The AI service could not be reached: {exc}") from exc

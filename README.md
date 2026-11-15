@@ -78,7 +78,7 @@ GEMINI_API_KEY=your-key-here
 
 Then run `streamlit run app.py`. The app loads `.env` automatically. Setting `GEMINI_API_KEY` in your shell also works and takes priority over the file.
 
-Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If both keys are set, choose with `PAWPAL_PROVIDER=gemini|anthropic`. Override the model with `PAWPAL_MODEL` (defaults: `gemini-2.5-flash`, `claude-haiku-5-5`). The rest of the app works without a key.
+Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If both keys are set, choose with `PAWPAL_PROVIDER=gemini|anthropic`. Override the model with `PAWPAL_MODEL` (defaults: `gemini-3.5-flash`, `claude-haiku-5-5`). The rest of the app works without a key.
 
 ### Reliability checks
 
