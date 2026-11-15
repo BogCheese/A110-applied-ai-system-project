@@ -189,20 +189,26 @@ else:
     if st.button("Plan with AI"):
         try:
             with st.spinner("Planning, checking, and revising..."):
-                agent_result = PlannerAgent(make_client()).run(owner, goal)
+                st.session_state.agent_result = PlannerAgent(make_client()).run(owner, goal)
         except AgentError as error:
+            st.session_state.pop("agent_result", None)
             st.error(str(error))
         else:
-            if agent_result.success:
-                st.success(f"Added {len(agent_result.tasks)} task(s) after {agent_result.attempts} attempt(s). All checks passed.")
-            else:
-                st.warning("Tasks were added, but some problems remain. Review the conflicts above.")
-                for issue in agent_result.issues:
-                    st.write(f"- {issue}")
-            with st.expander("What the agent did", expanded=True):
-                for step in agent_result.steps:
-                    st.write(f"**{step.kind}**: {step.detail}")
-            st.caption("The task list above refreshes the next time you click anything.")
+            # Re-run so the task list above shows the new tasks. The result is kept in
+            # session_state, so it is still displayed below (and after later clicks).
+            st.rerun()
+
+    agent_result = st.session_state.get("agent_result")
+    if agent_result:
+        if agent_result.success:
+            st.success(f"Added {len(agent_result.tasks)} task(s) after {agent_result.attempts} attempt(s). All checks passed.")
+        else:
+            st.warning("Tasks were added, but some problems remain. Review the conflicts above.")
+            for issue in agent_result.issues:
+                st.write(f"- {issue}")
+        with st.expander("What the agent did", expanded=True):
+            for step in agent_result.steps:
+                st.write(f"**{step.kind}**: {step.detail}")
 
 st.divider()
 
