@@ -24,12 +24,14 @@ import copy
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from pawpal_system import Frequency, Owner, Priority, Scheduler, Task, format_time
 
 logger = logging.getLogger("pawpal.agent")
+logging.getLogger("pawpal").addHandler(logging.NullHandler())  # quiet unless setup_logging() is called
 
 DEFAULT_MODEL = "claude-haiku-5-5"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
@@ -51,6 +53,10 @@ Rules:
 - The owner has a limited number of minutes per day: keep the daily total realistic.
 - Do not give two tasks overlapping preferred times (a task occupies
   preferred_time to preferred_time + duration_minutes).
+- Do not repeat a task the pet already has (same title and same time). Two feedings at
+  different times are fine and are not duplicates.
+- Respect the owner's day: never set a preferred_time during a busy block or outside
+  the day start/end you are given.
 - If you are told about problems with your previous attempt, fix them and
   return the complete corrected task list."""
 
@@ -124,6 +130,8 @@ class GeminiClient:
     """
 
     URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    RETRY_DELAYS = (3, 8)  # seconds to wait before each retry of a busy or rate-limited call
+    RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 
     def __init__(self, model: str | None = None, timeout: float = 60.0) -> None:
         self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -131,6 +139,7 @@ class GeminiClient:
             raise AgentError("GEMINI_API_KEY is not set. See the README for setup steps.")
         self.model = model or os.environ.get("PAWPAL_MODEL", DEFAULT_GEMINI_MODEL)
         self.timeout = timeout
+        self._sleep = time.sleep  # replaceable in tests
 
     def complete(self, system: str, messages: list[dict]) -> str:
         import urllib.error
@@ -149,20 +158,30 @@ class GeminiClient:
             data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.load(response)
-        except urllib.error.HTTPError as exc:
+        data = None
+        for attempt, delay in enumerate(self.RETRY_DELAYS + (None,)):
             try:
-                detail = json.loads(exc.read())["error"]["message"][:200]
-            except Exception:
-                detail = ""
-            logger.error("Gemini API returned HTTP %s: %s", exc.code, detail)
-            hint = " Rate limit: wait a minute and retry." if exc.code == 429 else ""
-            raise AgentError(f"The AI service returned an error (HTTP {exc.code}): {detail}{hint}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            logger.error("Gemini API call failed: %s", exc)
-            raise AgentError(f"The AI service could not be reached: {exc}") from exc
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    data = json.load(response)
+                break
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = json.loads(exc.read())["error"]["message"][:200]
+                except Exception:
+                    detail = ""
+                logger.error("Gemini API returned HTTP %s: %s", exc.code, detail)
+                if exc.code in self.RETRYABLE_STATUS and delay is not None:
+                    logger.info("Retrying in %ss (attempt %d)", delay, attempt + 1)
+                    self._sleep(delay)
+                    continue
+                hint = " Rate limit: wait a minute and retry." if exc.code == 429 else ""
+                raise AgentError(f"The AI service returned an error (HTTP {exc.code}): {detail}{hint}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                logger.error("Gemini API call failed: %s", exc)
+                if delay is not None:
+                    self._sleep(delay)
+                    continue
+                raise AgentError(f"The AI service could not be reached: {exc}") from exc
 
         try:
             parts = data["candidates"][0]["content"]["parts"]
@@ -226,6 +245,7 @@ class AgentResult:
     tasks: list[TaskSpec] = field(default_factory=list)
     steps: list[AgentStep] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)  # problems still unresolved at the end
+    duplicates: list[str] = field(default_factory=list)  # proposed tasks skipped as already present
     attempts: int = 0
     committed: bool = False
 
@@ -333,6 +353,7 @@ class PlannerAgent:
 
         best: list[TaskSpec] | None = None
         best_issues: list[str] = []
+        best_dups: list[str] = []
 
         for attempt in range(1, self.max_revisions + 2):
             result.attempts = attempt
@@ -355,17 +376,22 @@ class PlannerAgent:
                 result.steps.append(AgentStep("validate", f"Rejected {error}"))
                 logger.warning("Attempt %d rejected %s", attempt, error)
 
+            specs, dups = self._drop_duplicates(owner, specs)
+            for dup in dups:
+                result.steps.append(AgentStep("validate", f"Skipped duplicate: {dup}"))
+
             # ACT (dry run) + CHECK
             problems = list(errors)
             if specs:
                 problems += self._check(owner, specs)
-            else:
+            elif not dups:
                 problems.append("No valid tasks were produced.")
             for problem in problems[len(errors):]:
                 result.steps.append(AgentStep("check", problem))
 
-            if specs and (best is None or len(problems) <= len(best_issues)):
-                best, best_issues = specs, problems
+            # A reply made only of duplicates is still usable: there is just nothing new to add.
+            if (specs or dups) and (best is None or len(problems) <= len(best_issues)):
+                best, best_issues, best_dups = specs, problems, dups
 
             if not problems:
                 result.steps.append(AgentStep("check", "All checks passed: no new conflicts, everything fits."))
@@ -381,10 +407,12 @@ class PlannerAgent:
         # COMMIT the best attempt (the passing one, or the least-bad if none passed).
         result.tasks = best
         result.issues = best_issues
+        result.duplicates = best_dups
         self._commit(owner, best)
         result.committed = True
         outcome = "all checks passed" if not best_issues else f"{len(best_issues)} issue(s) remain"
-        result.steps.append(AgentStep("commit", f"Added {len(best)} task(s) to your pets; {outcome}."))
+        skipped = f", skipped {len(best_dups)} duplicate(s)" if best_dups else ""
+        result.steps.append(AgentStep("commit", f"Added {len(best)} task(s) to your pets{skipped}; {outcome}."))
         logger.info("Agent finished: %d tasks, attempts=%d, issues=%d", len(best), result.attempts, len(best_issues))
         return result
 
@@ -401,16 +429,58 @@ class PlannerAgent:
 
     @staticmethod
     def _describe_request(owner: Owner, goal: str) -> str:
-        pets = "\n".join(
-            f"- {pet.name} ({pet.species}), {len(pet.tasks)} existing task(s)" for pet in owner.pets
-        )
+        def describe_task(task: Task) -> str:
+            at = f" at {format_time(task.preferred_time)}" if task.preferred_time is not None else ""
+            return f"    - {task.title}: {task.duration_minutes} min, {task.priority.name.lower()}, {task.frequency.value}{at}"
+
+        pet_lines = []
+        for pet in owner.pets:
+            pending = [task for task in pet.tasks if not task.completed]
+            pet_lines.append(f"- {pet.name} ({pet.species}), existing tasks: {'none' if not pending else ''}".rstrip())
+            pet_lines.extend(describe_task(task) for task in pending)
+
+        day = f"the day starts at {format_time(owner.day_start_minute)}"
+        if owner.day_end_minute is not None:
+            day += f" and ends at {format_time(owner.day_end_minute)}"
+        busy = ""
+        if owner.busy_blocks:
+            blocks = ", ".join(f"{format_time(a)}-{format_time(b)}" for a, b in owner.busy_blocks)
+            busy = f" The owner is busy (no tasks possible) during: {blocks}."
         return (
             f"Goal: {goal}\n\n"
-            f"Pets:\n{pets}\n\n"
-            f"Owner has {owner.available_minutes} minutes available per day, "
-            f"the day starts at {format_time(owner.day_start_minute)}, "
-            f"and wants {owner.preferences.buffer_minutes} minute(s) between tasks."
+            "Pets:\n" + "\n".join(pet_lines) + "\n\n"
+            f"Owner has {owner.available_minutes} minutes available per day, {day}, "
+            f"and wants {owner.preferences.buffer_minutes} minute(s) between tasks.{busy}"
         )
+
+    @staticmethod
+    def _drop_duplicates(owner: Owner, specs: list[TaskSpec]) -> tuple[list[TaskSpec], list[str]]:
+        """Split specs into new ones and duplicates.
+
+        A duplicate is the same pet, same title (ignoring case) and same preferred time as a
+        pending task, or as an earlier proposal in this same batch. So a second feeding at a
+        different time is NOT a duplicate.
+        """
+
+        def key(pet: str, title: str, time_: int | None) -> tuple:
+            return (pet.lower(), title.strip().lower(), time_)
+
+        seen = {
+            key(pet.name, task.title, task.preferred_time)
+            for pet in owner.pets
+            for task in pet.tasks
+            if not task.completed
+        }
+        fresh, dups = [], []
+        for spec in specs:
+            k = key(spec.pet, spec.title, spec.preferred_time)
+            if k in seen:
+                when = f" at {format_time(spec.preferred_time)}" if spec.preferred_time is not None else ""
+                dups.append(f"{spec.title}{when} ({spec.pet})")
+            else:
+                seen.add(k)
+                fresh.append(spec)
+        return fresh, dups
 
     @staticmethod
     def _feedback(problems: list[str]) -> str:
@@ -435,6 +505,21 @@ class PlannerAgent:
         scheduler = Scheduler(trial)
         problems = [c for c in scheduler.detect_conflicts() if c not in baseline]
 
+        for spec in specs:
+            if spec.preferred_time is None:
+                continue
+            start, end = spec.preferred_time, spec.preferred_time + spec.duration_minutes
+            label = f"'{spec.title}' ({spec.pet}) at {format_time(start)}"
+            for block_start, block_end in owner.busy_blocks:
+                if start < block_end and block_start < end:
+                    problems.append(
+                        f"{label} falls during busy time {format_time(block_start)}-{format_time(block_end)}"
+                    )
+            if start < owner.day_start_minute:
+                problems.append(f"{label} is before the day starts at {format_time(owner.day_start_minute)}")
+            if owner.day_end_minute is not None and end > owner.day_end_minute:
+                problems.append(f"{label} runs past the day end at {format_time(owner.day_end_minute)}")
+
         plan = scheduler.generate_plan()
         new_ids = {task.id for task in new_tasks}
         for skipped in plan.skipped_items:
@@ -454,7 +539,7 @@ class PlannerAgent:
 def setup_logging(path: str = "pawpal.log") -> None:
     """Send PawPal's logs to a file (once). Safe to call on every Streamlit re-run."""
     root = logging.getLogger("pawpal")
-    if root.handlers:
+    if any(isinstance(h, logging.FileHandler) for h in root.handlers):
         return
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))

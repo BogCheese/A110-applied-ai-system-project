@@ -58,12 +58,12 @@ SCENARIOS = [
         "two pets, tight day", "Care routine for my cat and dog, I only have 45 minutes a day.",
         [("Mia", "cat"), ("Rex", "dog")], 45,
         [_tasks(
-            ("Mia", "Feeding", 10, "high", "daily", "07:00"),
-            ("Rex", "Feeding", 10, "high", "daily", "07:30"),
+            ("Mia", "Feeding", 10, "high", "daily", "08:00"),
+            ("Rex", "Feeding", 10, "high", "daily", "08:30"),
             ("Rex", "Long hike", 90, "medium", "daily", None),  # does not fit -> revise
         ), _tasks(
-            ("Mia", "Feeding", 10, "high", "daily", "07:00"),
-            ("Rex", "Feeding", 10, "high", "daily", "07:30"),
+            ("Mia", "Feeding", 10, "high", "daily", "08:00"),
+            ("Rex", "Feeding", 10, "high", "daily", "08:30"),
             ("Rex", "Short walk", 20, "medium", "daily", "17:00"),
         )],
     ),
