@@ -311,3 +311,70 @@ def test_edit_task_changes_a_field_and_rejects_unknown_or_protected_fields():
         pet.edit_task(walk, durration_minutes=10)  # typo'd field name
     with pytest.raises(ValueError):
         pet.edit_task(walk, id="hacked")  # id is managed by the system
+
+
+# ---- day end and busy blocks ----
+
+def _owner_with_one_pet(minutes=480):
+    owner = Owner("Jordan", minutes)
+    pet = Pet("Mia", "cat")
+    owner.add_pet(pet)
+    return owner, pet
+
+
+def test_task_is_moved_out_of_a_busy_block():
+    owner, pet = _owner_with_one_pet()
+    owner.add_busy_block(9 * 60, 17 * 60)  # work 9-5
+    pet.add_task(Task("Walk", 30, Priority.HIGH, preferred_time=10 * 60))  # during work
+    item = Scheduler(owner).generate_plan().scheduled_items[0]
+    assert item.start_minute == 8 * 60  # earliest free slot is before work
+
+
+def test_task_waits_until_after_work_when_the_morning_is_blocked():
+    owner, pet = _owner_with_one_pet()
+    owner.add_busy_block(8 * 60, 17 * 60)  # busy from the day start until 5 PM
+    pet.add_task(Task("Walk", 30, Priority.HIGH, preferred_time=10 * 60))
+    assert Scheduler(owner).generate_plan().scheduled_items[0].start_minute == 17 * 60
+
+
+def test_fallback_slot_skips_over_busy_block_when_it_will_not_fit_before():
+    owner, pet = _owner_with_one_pet()
+    owner.add_busy_block(8 * 60 + 15, 17 * 60)
+    pet.add_task(Task("Long play", 30, Priority.HIGH))  # 30 min does not fit in 8:00-8:15
+    assert Scheduler(owner).generate_plan().scheduled_items[0].start_minute == 17 * 60
+
+
+def test_nothing_is_scheduled_past_the_day_end():
+    owner, pet = _owner_with_one_pet()
+    owner.day_end_minute = 8 * 60 + 30
+    pet.add_task(Task("A", 20, Priority.HIGH))
+    pet.add_task(Task("B", 20, Priority.LOW))
+    plan = Scheduler(owner).generate_plan()
+    assert [i.task.title for i in plan.scheduled_items] == ["A"]
+    assert "no free time" in plan.skipped_items[0].reason
+
+
+def test_preferred_time_past_day_end_falls_back_or_skips():
+    owner, pet = _owner_with_one_pet()
+    owner.day_end_minute = 20 * 60
+    pet.add_task(Task("Late walk", 30, Priority.HIGH, preferred_time=19 * 60 + 45))  # would end 20:15
+    item = Scheduler(owner).generate_plan().scheduled_items[0]
+    assert item.start_minute == 8 * 60 and "preferred time" in item.reason
+
+
+def test_defaults_have_no_day_end_or_busy_blocks():
+    owner = Owner("Jordan", 60)
+    assert owner.day_end_minute is None and owner.busy_blocks == []
+
+
+def test_busy_block_validation_and_removal():
+    owner = Owner("Jordan", 60)
+    with pytest.raises(ValueError):
+        owner.add_busy_block(600, 600)
+    with pytest.raises(ValueError):
+        owner.add_busy_block(700, 600)
+    owner.add_busy_block(900, 1000)
+    owner.add_busy_block(540, 600)
+    assert owner.busy_blocks == [(540, 600), (900, 1000)]  # kept in time order
+    owner.remove_busy_block((540, 600))
+    assert owner.busy_blocks == [(900, 1000)]

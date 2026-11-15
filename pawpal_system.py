@@ -167,6 +167,20 @@ class Owner:
     day_start_minute: int = 8 * 60  # when the schedule begins; default 8:00 AM
     preferences: Preferences = field(default_factory=Preferences)
     pets: list[Pet] = field(default_factory=list)
+    day_end_minute: int | None = None  # optional: nothing may run past this time
+    # Optional blocks the owner is unavailable (e.g. work 9-5), as (start, end) minutes.
+    busy_blocks: list[tuple[int, int]] = field(default_factory=list)
+
+    def add_busy_block(self, start_minute: int, end_minute: int) -> None:
+        """Mark a time range as unavailable. Raises ValueError if the range is empty or backwards."""
+        if not 0 <= start_minute < end_minute <= 24 * 60:
+            raise ValueError("A busy block must start before it ends, within one day")
+        self.busy_blocks.append((start_minute, end_minute))
+        self.busy_blocks.sort()
+
+    def remove_busy_block(self, block: tuple[int, int]) -> None:
+        """Remove a busy block (raises ValueError if it isn't here)."""
+        self.busy_blocks.remove(block)
 
     def add_pet(self, pet: Pet) -> None:
         """Add a pet to this owner."""
@@ -322,6 +336,8 @@ class Scheduler:
           high-priority task can use up time that several smaller ones would fit.
         - A task is scheduled at its preferred_time if that slot is free;
           otherwise it goes in the earliest free slot after owner.day_start_minute.
+        - Nothing is placed past owner.day_end_minute (if set) or inside a busy block;
+          a task with no such slot is skipped with a reason.
         - Every task ends up either scheduled or skipped, each with a reason.
         """
         plan_date = plan_date or date.today()
@@ -353,7 +369,11 @@ class Scheduler:
                 )
                 continue
 
-            start, placement = self._choose_start(plan, task, buffer)
+            chosen = self._choose_start(plan, task, buffer)
+            if chosen is None:
+                plan.skip(task, "no free time left in your day (check your day end and busy times)")
+                continue
+            start, placement = chosen
             reason = f"{task.priority.name.lower()} priority, {placement}"
             plan.add_item(task, start, reason)
             minutes_left -= time_needed
@@ -373,20 +393,28 @@ class Scheduler:
         """True if the task is due on or before plan_date and not yet completed."""
         return task.due_date <= plan_date and not task.completed
 
-    def _choose_start(self, plan: DailyPlan, task: Task, buffer: int) -> tuple[int, str]:
-        """Pick a start time for the task and describe how it was chosen."""
+    def _choose_start(self, plan: DailyPlan, task: Task, buffer: int) -> tuple[int, str] | None:
+        """Pick a start time for the task and describe how it was chosen (None if nothing fits)."""
         preferred = task.preferred_time
         if preferred is not None and self._is_free(plan, preferred, task, buffer):
             return preferred, f"placed at its preferred time {format_time(preferred)}"
 
         start = self._earliest_free_start(plan, task, buffer)
+        if start is None:
+            return None
         if preferred is not None:
-            return start, "preferred time was taken, placed in the next free slot"
+            return start, "preferred time was taken or unavailable, placed in the next free slot"
         return start, "placed in the earliest free slot"
 
     def _is_free(self, plan: DailyPlan, start: int, task: Task, buffer: int) -> bool:
-        """True if the task fits at `start` without overlapping a scheduled task."""
+        """True if the task fits at `start`: inside the day, outside busy blocks, and clear of other tasks."""
         end = start + task.duration_minutes
+        day_end = self.owner.day_end_minute
+        if day_end is not None and end > day_end:
+            return False
+        for block_start, block_end in self.owner.busy_blocks:
+            if start < block_end and block_start < end:
+                return False
         for item in plan.scheduled_items:
             ends_before_item = end + buffer <= item.start_minute
             starts_after_item = start >= item.end_minute + buffer
@@ -394,12 +422,18 @@ class Scheduler:
                 return False
         return True
 
-    def _earliest_free_start(self, plan: DailyPlan, task: Task, buffer: int) -> int:
-        """Find the first start time, from the day start onward, where the task fits."""
-        start = self.owner.day_start_minute
-        # Items are sorted by start time, so walk forward past each one that is in the way.
-        for item in plan.scheduled_items:
-            if self._is_free(plan, start, task, buffer):
-                break
-            start = max(start, item.end_minute + buffer)
-        return start
+    def _earliest_free_start(self, plan: DailyPlan, task: Task, buffer: int) -> int | None:
+        """Find the first start time, from the day start onward, where the task fits.
+
+        The earliest possible start is either the day start or the moment something
+        in the way (a scheduled task or a busy block) ends, so only those are tried.
+        Returns None if the task fits nowhere in the day.
+        """
+        day_start = self.owner.day_start_minute
+        candidates = {day_start}
+        candidates.update(item.end_minute + buffer for item in plan.scheduled_items)
+        candidates.update(block_end for _, block_end in self.owner.busy_blocks)
+        for start in sorted(candidates):
+            if start >= day_start and self._is_free(plan, start, task, buffer):
+                return start
+        return None
