@@ -325,6 +325,37 @@ def validate_tasks(raw_tasks: list, pet_names: list[str]) -> tuple[list[TaskSpec
     return specs, errors
 
 
+def describe_context(owner: Owner) -> str:
+    """The facts about the owner that are sent to the model along with the goal.
+
+    The UI shows this same text before the user types a goal, so what they see is
+    exactly what the model is told.
+    """
+
+    def describe_task(task: Task) -> str:
+        at = f" at {format_time(task.preferred_time)}" if task.preferred_time is not None else ""
+        return f"    - {task.title}: {task.duration_minutes} min, {task.priority.name.lower()}, {task.frequency.value}{at}"
+
+    pet_lines = []
+    for pet in owner.pets:
+        pending = [task for task in pet.tasks if not task.completed]
+        pet_lines.append(f"- {pet.name} ({pet.species}), existing tasks: {'none' if not pending else ''}".rstrip())
+        pet_lines.extend(describe_task(task) for task in pending)
+
+    day = f"the day starts at {format_time(owner.day_start_minute)}"
+    if owner.day_end_minute is not None:
+        day += f" and ends at {format_time(owner.day_end_minute)}"
+    busy = ""
+    if owner.busy_blocks:
+        blocks = ", ".join(f"{format_time(a)}-{format_time(b)}" for a, b in owner.busy_blocks)
+        busy = f" The owner is busy (no tasks possible) during: {blocks}."
+    return (
+        "Pets:\n" + "\n".join(pet_lines) + "\n\n"
+        f"Owner has {owner.available_minutes} minutes available per day, {day}, "
+        f"and wants {owner.preferences.buffer_minutes} minute(s) between tasks.{busy}"
+    )
+
+
 class PlannerAgent:
     """Plans pet-care tasks from a goal, checking its own work with the Scheduler."""
 
@@ -429,29 +460,7 @@ class PlannerAgent:
 
     @staticmethod
     def _describe_request(owner: Owner, goal: str) -> str:
-        def describe_task(task: Task) -> str:
-            at = f" at {format_time(task.preferred_time)}" if task.preferred_time is not None else ""
-            return f"    - {task.title}: {task.duration_minutes} min, {task.priority.name.lower()}, {task.frequency.value}{at}"
-
-        pet_lines = []
-        for pet in owner.pets:
-            pending = [task for task in pet.tasks if not task.completed]
-            pet_lines.append(f"- {pet.name} ({pet.species}), existing tasks: {'none' if not pending else ''}".rstrip())
-            pet_lines.extend(describe_task(task) for task in pending)
-
-        day = f"the day starts at {format_time(owner.day_start_minute)}"
-        if owner.day_end_minute is not None:
-            day += f" and ends at {format_time(owner.day_end_minute)}"
-        busy = ""
-        if owner.busy_blocks:
-            blocks = ", ".join(f"{format_time(a)}-{format_time(b)}" for a, b in owner.busy_blocks)
-            busy = f" The owner is busy (no tasks possible) during: {blocks}."
-        return (
-            f"Goal: {goal}\n\n"
-            "Pets:\n" + "\n".join(pet_lines) + "\n\n"
-            f"Owner has {owner.available_minutes} minutes available per day, {day}, "
-            f"and wants {owner.preferences.buffer_minutes} minute(s) between tasks.{busy}"
-        )
+        return f"Goal: {goal}\n\n{describe_context(owner)}"
 
     @staticmethod
     def _drop_duplicates(owner: Owner, specs: list[TaskSpec]) -> tuple[list[TaskSpec], list[str]]:

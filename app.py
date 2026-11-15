@@ -2,7 +2,7 @@ import streamlit as st
 
 from datetime import date
 
-from pawpal_agent import AgentError, PlannerAgent, make_client, setup_logging
+from pawpal_agent import AgentError, PlannerAgent, describe_context, make_client, setup_logging
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task, format_time
 
 setup_logging()
@@ -295,6 +295,10 @@ st.caption(
 if not owner.pets:
     st.caption("Add a pet first.")
 else:
+    # Show the user exactly what the AI will be told besides their request.
+    with st.container(border=True):
+        st.caption("The AI is automatically given this about you (change it in the sections above):")
+        st.text(describe_context(owner))
     goal = st.text_area("What should PawPal+ plan?", placeholder="I just adopted a puppy, set up a daily care routine.")
     if st.button("Plan with AI"):
         try:

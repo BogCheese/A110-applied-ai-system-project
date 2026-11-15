@@ -162,3 +162,13 @@ def test_task_can_be_edited_and_deleted(app):
     click(app, "Delete task")
     assert pet.tasks == []
     assert not app.exception
+
+
+def test_planner_shows_the_user_what_the_ai_is_told(app):
+    from pawpal_agent import describe_context
+
+    pick(app, "Day ends at (optional)", "9:00 PM")
+    click(app, "Add busy time")  # 9:00 AM - 5:00 PM
+    shown = "\n".join(t.value for t in app.text)
+    assert "ends at 9:00 PM" in shown and "9:00 AM-5:00 PM" in shown and "Nala (cat)" in shown
+    assert shown == describe_context(app.session_state.owner)  # identical to what the model receives
