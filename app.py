@@ -2,7 +2,10 @@ import streamlit as st
 
 from datetime import time
 
+from pawpal_agent import AgentError, PlannerAgent, make_client, setup_logging
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task, format_time
+
+setup_logging()
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -171,6 +174,35 @@ if owner.get_all_tasks():
         st.success("No time conflicts between your tasks.")
 else:
     st.info("No tasks yet. Add one above.")
+
+st.divider()
+
+st.subheader("AI Planner")
+st.caption(
+    "Describe a goal and the AI proposes tasks for your pets. PawPal+ then checks them for time "
+    "conflicts and available minutes, and sends any problems back to the AI to fix before adding anything."
+)
+if not owner.pets:
+    st.caption("Add a pet first.")
+else:
+    goal = st.text_area("What should PawPal+ plan?", placeholder="I just adopted a puppy, set up a daily care routine.")
+    if st.button("Plan with AI"):
+        try:
+            with st.spinner("Planning, checking, and revising..."):
+                agent_result = PlannerAgent(make_client()).run(owner, goal)
+        except AgentError as error:
+            st.error(str(error))
+        else:
+            if agent_result.success:
+                st.success(f"Added {len(agent_result.tasks)} task(s) after {agent_result.attempts} attempt(s). All checks passed.")
+            else:
+                st.warning("Tasks were added, but some problems remain. Review the conflicts above.")
+                for issue in agent_result.issues:
+                    st.write(f"- {issue}")
+            with st.expander("What the agent did", expanded=True):
+                for step in agent_result.steps:
+                    st.write(f"**{step.kind}**: {step.detail}")
+            st.caption("The task list above refreshes the next time you click anything.")
 
 st.divider()
 

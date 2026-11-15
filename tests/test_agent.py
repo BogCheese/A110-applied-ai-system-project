@@ -1,0 +1,172 @@
+"""Tests for the planning agent, using a scripted fake model (no network)."""
+
+import json
+
+import pytest
+
+from pawpal_agent import AgentError, PlannerAgent, extract_json, parse_time, validate_tasks
+from pawpal_system import Frequency, Owner, Pet, Priority
+
+
+class FakeLLM:
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+
+    def complete(self, system, messages):
+        self.calls.append(list(messages))
+        return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+
+
+def reply(*tasks):
+    keys = ("pet", "title", "duration_minutes", "priority", "frequency", "preferred_time")
+    return json.dumps({"tasks": [dict(zip(keys, t)) for t in tasks]})
+
+
+@pytest.fixture
+def owner():
+    o = Owner("Jordan", 60)
+    o.add_pet(Pet("Mia", "cat"))
+    return o
+
+
+def test_good_plan_commits_in_one_attempt(owner):
+    llm = FakeLLM(reply(("Mia", "Feeding", 10, "high", "daily", "08:00")))
+    result = PlannerAgent(llm).run(owner, "feed my cat")
+    assert result.success and result.attempts == 1
+    task = owner.pets[0].tasks[0]
+    assert (task.title, task.priority, task.frequency, task.preferred_time) == ("Feeding", Priority.HIGH, Frequency.DAILY, 480)
+
+
+def test_conflict_is_sent_back_and_revised(owner):
+    bad = reply(("Mia", "Feeding", 30, "high", "daily", "08:00"), ("Mia", "Play", 20, "low", "daily", "08:10"))
+    good = reply(("Mia", "Feeding", 30, "high", "daily", "08:00"), ("Mia", "Play", 20, "low", "daily", "09:00"))
+    llm = FakeLLM(bad, good)
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.success and result.attempts == 2
+    assert "Conflict" in llm.calls[1][-1]["content"]  # the scheduler's warning reached the model
+    assert len(owner.pets[0].tasks) == 2  # only the revised plan was committed
+
+
+def test_task_that_does_not_fit_triggers_revision(owner):
+    llm = FakeLLM(
+        reply(("Mia", "Marathon", 200, "high", "once", None)),
+        reply(("Mia", "Walk", 20, "high", "once", None)),
+    )
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.success and [t.title for t in owner.pets[0].tasks] == ["Walk"]
+
+
+def test_unresolved_problems_are_reported_not_hidden(owner):
+    same_conflict = reply(("Mia", "A", 30, "high", "once", "08:00"), ("Mia", "B", 30, "high", "once", "08:10"))
+    result = PlannerAgent(FakeLLM(same_conflict), max_revisions=1).run(owner, "plan")
+    assert result.committed and not result.success and result.issues
+    assert result.attempts == 2
+
+
+def test_garbage_then_valid_reply_recovers(owner):
+    llm = FakeLLM("no json here", reply(("Mia", "Feeding", 10, "high", "daily", None)))
+    assert PlannerAgent(llm).run(owner, "plan").success
+
+
+def test_never_valid_leaves_owner_unchanged(owner):
+    with pytest.raises(AgentError):
+        PlannerAgent(FakeLLM("nope"), max_revisions=1).run(owner, "plan")
+    assert owner.get_all_tasks() == []
+
+
+def test_llm_crash_becomes_agent_error(owner):
+    class Boom:
+        def complete(self, system, messages):
+            raise RuntimeError("network down")
+
+    with pytest.raises(AgentError):
+        PlannerAgent(Boom()).run(owner, "plan")
+    assert owner.get_all_tasks() == []
+
+
+def test_existing_conflicts_are_not_blamed_on_agent(owner):
+    from pawpal_system import Task
+
+    owner.pets[0].add_task(Task("Old A", 30, Priority.LOW, preferred_time=600))
+    owner.pets[0].add_task(Task("Old B", 30, Priority.LOW, preferred_time=610))
+    result = PlannerAgent(FakeLLM(reply(("Mia", "Feeding", 10, "high", "daily", "08:00")))).run(owner, "plan")
+    assert result.success
+
+
+def test_empty_goal_and_no_pets_rejected(owner):
+    with pytest.raises(AgentError):
+        PlannerAgent(FakeLLM("{}")).run(owner, "   ")
+    with pytest.raises(AgentError):
+        PlannerAgent(FakeLLM("{}")).run(Owner("X", 30), "plan")
+
+
+def test_validate_rejects_bad_items():
+    raw = [
+        {"pet": "Ghost", "title": "x", "duration_minutes": 5, "priority": "high"},
+        {"pet": "Mia", "title": "x", "duration_minutes": 0, "priority": "high"},
+        {"pet": "Mia", "title": "x", "duration_minutes": True, "priority": "high"},
+        {"pet": "Mia", "title": "x", "duration_minutes": 5, "priority": "urgent"},
+        {"pet": "Mia", "title": "x", "duration_minutes": 5, "priority": "low", "preferred_time": "25:99"},
+        "not a dict",
+        {"pet": "mia", "title": "ok", "duration_minutes": 5, "priority": "LOW"},
+    ]
+    specs, errors = validate_tasks(raw, ["Mia"])
+    assert len(specs) == 1 and specs[0].pet == "Mia" and len(errors) == 6
+
+
+def test_parse_time_and_extract_json():
+    assert parse_time("08:30") == 510 and parse_time(None) is None
+    with pytest.raises(ValueError):
+        parse_time("8am")
+    assert extract_json('```json\n{"tasks": []}\n```') == {"tasks": []}
+    with pytest.raises(ValueError):
+        extract_json('{"tasks": "no"}')
+
+
+def test_make_client_picks_provider_from_env(monkeypatch):
+    from pawpal_agent import GeminiClient, make_client
+
+    for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "PAWPAL_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(AgentError):
+        make_client()
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    assert isinstance(make_client(), GeminiClient)
+    monkeypatch.setenv("PAWPAL_PROVIDER", "bogus")
+    with pytest.raises(AgentError):
+        make_client()
+
+
+def test_gemini_client_parses_response_and_errors(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from pawpal_agent import GeminiClient
+
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    payload = {"candidates": [{"content": {"parts": [{"text": '{"tasks": []}'}]}}]}
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: io.StringIO(json.dumps(payload)))
+    assert GeminiClient().complete("sys", [{"role": "user", "content": "hi"}]) == '{"tasks": []}'
+
+    def rate_limited(req, timeout):
+        raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", rate_limited)
+    with pytest.raises(AgentError, match="429"):
+        GeminiClient().complete("sys", [{"role": "user", "content": "hi"}])
+
+
+def test_load_env_reads_file_without_overriding(tmp_path, monkeypatch):
+    from pawpal_agent import load_env
+
+    env_file = tmp_path / ".env"
+    env_file.write_text('# comment\nPAWPAL_A="from-file"\nPAWPAL_B=file-b\n\n')
+    monkeypatch.delenv("PAWPAL_A", raising=False)
+    monkeypatch.setenv("PAWPAL_B", "real")
+    load_env(str(env_file))
+    import os
+
+    assert os.environ["PAWPAL_A"] == "from-file" and os.environ["PAWPAL_B"] == "real"
+    monkeypatch.delenv("PAWPAL_A")
+    load_env(str(tmp_path / "missing.env"))  # no file: no error

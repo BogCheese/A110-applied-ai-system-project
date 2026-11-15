@@ -54,6 +54,42 @@ pip install -r requirements.txt
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
 
+## AI Planning Agent
+
+Type a goal like *"I just adopted a puppy, set up a daily care routine"* and the agent adds real tasks to your pets. It is an **agentic workflow** (plan, act, check, revise) and the checks are PawPal's own scheduler, not the model's opinion. See [diagrams/architecture.mmd](diagrams/architecture.mmd).
+
+1. **Plan**: The model (Gemini or Claude) proposes tasks as JSON.
+2. **Validate (guardrails)**: unknown pets, bad durations, priorities, or times are rejected and reported back to the model.
+3. **Act on a copy**: tasks are added to a dry-run copy of your data.
+4. **Check**: `Scheduler.detect_conflicts()` and `Scheduler.generate_plan()` find new conflicts and tasks that don't fit your minutes.
+5. **Revise**: problems go back to the model, up to 3 times. Only then are tasks added to your real pets. If problems remain, they are shown to you instead of hidden.
+
+If the API is down or the model never returns a usable plan, you get an error message and your data is unchanged. Everything is logged to `pawpal.log`.
+
+### AI setup
+
+PawPal+ works with Google Gemini (free tier) or Anthropic Claude. Get a free Gemini key at https://aistudio.google.com/apikey, then:
+
+Easiest: copy `.env.example` to a file named `.env` in the project folder (it is git-ignored, so your key is never committed), and put your key in it:
+
+```
+GEMINI_API_KEY=your-key-here
+```
+
+Then run `streamlit run app.py`. The app loads `.env` automatically. Setting `GEMINI_API_KEY` in your shell also works and takes priority over the file.
+
+Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If both keys are set, choose with `PAWPAL_PROVIDER=gemini|anthropic`. Override the model with `PAWPAL_MODEL` (defaults: `gemini-2.5-flash`, `claude-haiku-5-5`). The rest of the app works without a key.
+
+### Reliability checks
+
+```bash
+python -m pytest                      # 37 tests; agent tests use a scripted fake model, no network
+python -m evals.run_eval              # offline: 4 scenarios x 3 runs with a scripted model
+python -m evals.run_eval --live --repeats 5   # real model (free Gemini tier is rate limited: use fewer repeats if you hit it): pass rate and consistency
+```
+
+The eval scores each run on: plan committed, no conflicts, fits available time, every pet covered, every dog/cat has a feeding task. It also reports average attempts and whether the task count was the same across repeats. The offline mode checks the harness and the revision loop; only `--live` measures the real model.
+
 ## Implementation Summary
 
 The logic lives in `pawpal_system.py` and can be tried from the terminal with `python main.py`.

@@ -1,0 +1,16 @@
+flowchart TD
+    User([User]) --> UI[Streamlit UI<br/>app.py]
+    UI -->|manual tasks| Logic
+    UI -->|goal in plain English| Agent[PlannerAgent<br/>pawpal_agent.py]
+    Agent -->|1 plan| LLM[(LLM API (Gemini or Claude))]
+    LLM -->|JSON tasks| Guard[Guardrails<br/>validate_tasks]
+    Guard -->|2 valid tasks| Trial[Dry run on a copy of the Owner]
+    Trial -->|3 check| Sched[Scheduler:<br/>detect_conflicts, generate_plan]
+    Sched -->|problems| Agent
+    Agent -->|4 commit when checks pass| Logic[PawPal logic layer<br/>pawpal_system.py]
+    Logic --> Sched
+    Sched --> UI
+    Agent -.-> Log[(pawpal.log)]
+    Eval[evals/run_eval.py<br/>scenarios + scores] -.->|runs| Agent
+    Tests[pytest suite<br/>tests/] -.-> Logic
+    Tests -.-> Agent
