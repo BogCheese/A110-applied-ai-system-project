@@ -5,7 +5,7 @@ import json
 import pytest
 
 from pawpal_agent import AgentError, PlannerAgent, extract_json, parse_time, validate_tasks
-from pawpal_system import Frequency, Owner, Pet, Priority
+from pawpal_system import Frequency, Owner, Pet, Priority, Task
 
 
 class FakeLLM:
@@ -153,8 +153,10 @@ def test_gemini_client_parses_response_and_errors(monkeypatch):
         raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
 
     monkeypatch.setattr(urllib.request, "urlopen", rate_limited)
+    client = GeminiClient()
+    client._sleep = lambda seconds: None  # don't really wait between retries
     with pytest.raises(AgentError, match="429"):
-        GeminiClient().complete("sys", [{"role": "user", "content": "hi"}])
+        client.complete("sys", [{"role": "user", "content": "hi"}])
 
 
 def test_load_env_reads_file_without_overriding(tmp_path, monkeypatch):
@@ -170,3 +172,80 @@ def test_load_env_reads_file_without_overriding(tmp_path, monkeypatch):
     assert os.environ["PAWPAL_A"] == "from-file" and os.environ["PAWPAL_B"] == "real"
     monkeypatch.delenv("PAWPAL_A")
     load_env(str(tmp_path / "missing.env"))  # no file: no error
+
+
+def test_gemini_retries_then_succeeds(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from pawpal_agent import GeminiClient
+
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    outcomes = [urllib.error.HTTPError("u", 503, "Busy", {}, None), io.StringIO(json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}))]
+    waits = []
+
+    def flaky(req, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(urllib.request, "urlopen", flaky)
+    client = GeminiClient()
+    client._sleep = waits.append
+    assert client.complete("s", [{"role": "user", "content": "hi"}]) == "ok"
+    assert waits == [3]  # waited once, then the retry worked
+
+
+def test_second_feeding_at_a_different_time_is_not_a_duplicate(owner):
+    owner.pets[0].add_task(Task("Feeding", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
+    llm = FakeLLM(reply(("Mia", "feeding", 10, "high", "daily", "18:00")))
+    result = PlannerAgent(llm).run(owner, "second meal")
+    assert result.success and result.duplicates == []
+    assert len(owner.pets[0].tasks) == 2
+
+
+def test_same_title_and_time_is_skipped_as_duplicate(owner):
+    owner.pets[0].add_task(Task("Feeding", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
+    llm = FakeLLM(reply(("Mia", "FEEDING", 10, "high", "daily", "08:00"), ("Mia", "Play", 15, "low", "daily", "09:00")))
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.success and len(result.duplicates) == 1
+    assert [t.title for t in owner.pets[0].tasks] == ["Feeding", "Play"]
+    assert any("Skipped duplicate" in step.detail for step in result.steps)
+
+
+def test_all_duplicates_adds_nothing_and_still_succeeds(owner):
+    owner.pets[0].add_task(Task("Feeding", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
+    result = PlannerAgent(FakeLLM(reply(("Mia", "Feeding", 10, "high", "daily", "08:00")))).run(owner, "plan")
+    assert result.success and result.tasks == [] and len(owner.pets[0].tasks) == 1
+
+
+def test_duplicates_inside_one_reply_are_collapsed(owner):
+    llm = FakeLLM(reply(("Mia", "Play", 10, "low", "daily", "09:00"), ("Mia", "play", 10, "low", "daily", "09:00")))
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert len(owner.pets[0].tasks) == 1 and len(result.duplicates) == 1
+
+
+def test_busy_time_and_day_window_are_checked_and_sent_back(owner):
+    owner.add_busy_block(9 * 60, 17 * 60)  # work 9-5
+    owner.day_end_minute = 21 * 60
+    bad = reply(("Mia", "Play", 20, "low", "daily", "10:00"), ("Mia", "Late meal", 10, "high", "daily", "21:00"))
+    good = reply(("Mia", "Play", 20, "low", "daily", "17:30"), ("Mia", "Late meal", 10, "high", "daily", "20:00"))
+    llm = FakeLLM(bad, good)
+    result = PlannerAgent(llm).run(owner, "plan around my job")
+    assert result.success and result.attempts == 2
+    feedback = llm.calls[1][-1]["content"]
+    assert "busy time" in feedback and "runs past the day end" in feedback
+
+
+def test_prompt_lists_existing_tasks_and_the_owners_day(owner):
+    from pawpal_agent import PlannerAgent as Agent
+    from pawpal_system import Task as T
+
+    owner.pets[0].add_task(T("Feeding", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
+    owner.add_busy_block(9 * 60, 17 * 60)
+    owner.day_end_minute = 22 * 60
+    text = Agent._describe_request(owner, "goal")
+    assert "Feeding: 10 min, high, daily at 8:00 AM" in text
+    assert "ends at 10:00 PM" in text and "9:00 AM-5:00 PM" in text

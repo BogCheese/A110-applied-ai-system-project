@@ -32,7 +32,9 @@ Your final app should:
 - **Conflict warnings.** Tasks whose preferred times overlap, for the same pet or different pets, produce a readable warning instead of an error (`Scheduler.detect_conflicts()`).
 - **Daily and weekly recurrence.** Completing a repeating task creates the next one, due tomorrow (daily) or in 7 days (weekly). Completing the same task twice does not create duplicates.
 - **Explained plans.** Every scheduled and skipped task comes with a plain-language reason (`Scheduler.explain_plan()`).
-- **Tested.** 26 automated tests cover scheduling, sorting, filtering, recurrence, conflicts, and edge cases.
+- **Your day, your rules.** Set when your day starts, optionally when it ends, and add busy times such as work 9 AM - 5 PM. Nothing is scheduled in a busy time or past the day end, and the AI planner avoids them too.
+- **Edit and delete tasks** in the UI, with due dates shown in the task table.
+- **Tested.** 64 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
 
 ## Getting started
 
@@ -59,12 +61,12 @@ pip install -r requirements.txt
 Type a goal like *"I just adopted a puppy, set up a daily care routine"* and the agent adds real tasks to your pets. It is an **agentic workflow** (plan, act, check, revise) and the checks are PawPal's own scheduler, not the model's opinion. See [diagrams/architecture.mmd](diagrams/architecture.mmd).
 
 1. **Plan**: The model (Gemini or Claude) proposes tasks as JSON.
-2. **Validate (guardrails)**: unknown pets, bad durations, priorities, or times are rejected and reported back to the model.
+2. **Validate (guardrails)**: unknown pets, bad durations, priorities, or times are rejected and reported back to the model. A task that duplicates an existing one (same pet, title and time) is skipped; a second feeding at a different time is fine.
 3. **Act on a copy**: tasks are added to a dry-run copy of your data.
-4. **Check**: `Scheduler.detect_conflicts()` and `Scheduler.generate_plan()` find new conflicts and tasks that don't fit your minutes.
+4. **Check**: `Scheduler.detect_conflicts()` and `Scheduler.generate_plan()` find new conflicts and tasks that don't fit your minutes, and times that fall in a busy block or outside your day.
 5. **Revise**: problems go back to the model, up to 3 times. Only then are tasks added to your real pets. If problems remain, they are shown to you instead of hidden.
 
-If the API is down or the model never returns a usable plan, you get an error message and your data is unchanged. Everything is logged to `pawpal.log`.
+Gemini calls retry automatically when the service is busy or rate limited. If the API is down or the model never returns a usable plan, you get an error message and your data is unchanged. Everything is logged to `pawpal.log`.
 
 ### AI setup
 
@@ -83,7 +85,7 @@ Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If bo
 ### Reliability checks
 
 ```bash
-python -m pytest                      # 37 tests; agent tests use a scripted fake model, no network
+python -m pytest                      # 64 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
 python -m evals.run_eval              # offline: 4 scenarios x 3 runs with a scripted model
 python -m evals.run_eval --live --repeats 5   # real model (free Gemini tier is rate limited: use fewer repeats if you hit it): pass rate and consistency
 ```
