@@ -2,6 +2,7 @@ import streamlit as st
 
 from datetime import date
 
+from calendar_view import render_calendar_html
 from pawpal_agent import AgentError, PlannerAgent, describe_context, make_client, setup_logging
 from pawpal_system import Frequency, Owner, Pet, Preferences, Priority, Scheduler, Task, format_time
 
@@ -78,9 +79,21 @@ def build_schedule_view(owner: Owner, plan) -> dict:
     Plain data (not the live plan) means the saved schedule stays exactly as it was
     built, even if tasks are edited afterwards.
     """
-    entries = []  # (start, end, text)
+    entries = []  # (start, end, text) for the list view
+    blocks = []  # structured data for the calendar view
     for item in plan.scheduled_items:
         task = item.task
+        blocks.append(
+            {
+                "kind": "task",
+                "start": item.start_minute,
+                "end": item.end_minute,
+                "title": task.title,
+                "pet": task.pet_name,
+                "priority": task.priority.name.lower(),
+                "reason": item.reason.split(", ", 1)[-1],
+            }
+        )
         entries.append(
             (
                 item.start_minute,
@@ -91,6 +104,7 @@ def build_schedule_view(owner: Owner, plan) -> dict:
         )
     for start, end in owner.busy_blocks:
         entries.append((start, end, "🚫 Busy, no tasks"))
+        blocks.append({"kind": "busy", "start": start, "end": end})
     entries.sort()
 
     timeline = []
@@ -109,22 +123,33 @@ def build_schedule_view(owner: Owner, plan) -> dict:
         "total_minutes": plan.total_minutes,
         "available_minutes": owner.available_minutes,
         "timeline": timeline,
-        "skipped": [(s.task.title, s.task.pet_name, s.reason) for s in plan.skipped_items],
+        "blocks": blocks,
+        "pet_names": [pet.name for pet in owner.pets],
+        "day_start": owner.day_start_minute,
+        "day_end": owner.day_end_minute,
+        # Finished tasks aren't "left out", so they are not listed.
+        "skipped": [
+            (s.task.title, s.task.pet_name, s.reason) for s in plan.skipped_items if s.reason != "already completed"
+        ],
     }
 
 
 def render_schedule(view: dict) -> None:
-    """Draw a saved schedule as a time-ordered list."""
+    """Draw a saved schedule: a calendar of time blocks, plus the same thing as a plain list."""
     if view["scheduled_count"]:
         st.success(
             f"Scheduled {view['scheduled_count']} task(s) using "
-            f"{view['total_minutes']} of {view['available_minutes']} minutes."
+            f"{view['total_minutes']} of {view['available_minutes']} minutes of task time "
+            f"(gaps between tasks aren't counted)."
         )
-        st.markdown(
-            "\n".join(
-                f"- **{format_time(start)} – {format_time(end)}** · {text}" for start, end, text in view["timeline"]
+        st.html(render_calendar_html(view["blocks"], view["pet_names"], view["day_start"], view["day_end"]))
+        with st.expander("Show as a list"):
+            st.markdown(
+                "\n".join(
+                    f"- **{format_time(start)} – {format_time(end)}** · {text}"
+                    for start, end, text in view["timeline"]
+                )
             )
-        )
     else:
         st.warning("Nothing could be scheduled. Add tasks or increase your available time.")
 
@@ -188,7 +213,7 @@ with st.expander("How PawPal+ works", expanded=False):
 # ---------------------------------------------------------------------------
 
 st.header("1. Your day")
-owner.name = st.text_input("Owner name", value=owner.name, placeholder="Pet Owner")
+owner.name = st.text_input("Pet Owner", value=owner.name, placeholder="Name")
 owner.available_minutes = int(
     st.number_input(
         "Time I can spend on pet care today (minutes)",

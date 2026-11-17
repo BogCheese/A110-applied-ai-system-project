@@ -265,7 +265,17 @@ def test_schedule_timeline_shows_busy_time_and_free_time(app):
 
 def test_no_sidebar_and_owner_name_is_editable(app):
     assert len(app.sidebar) == 0  # everything lives on the main page
-    name_box = [t for t in app.text_input if t.label == "Owner name"][0]
-    assert name_box.value == "" and name_box.placeholder == "Pet Owner"  # greyed hint, not a typed name
+    name_box = [t for t in app.text_input if t.label == "Pet Owner"][0]
+    assert name_box.value == "" and name_box.placeholder == "Name"  # greyed hint, not a typed name
     name_box.set_value("Brandon").run()
     assert app.session_state.owner.name == "Brandon"
+
+
+def test_schedule_is_drawn_as_a_calendar_with_a_list_alternative(app):
+    app.session_state.owner.pets[0].add_task(Task("Play", 30, Priority.HIGH, Frequency.ONCE))
+    app.run()
+    click(app, "Generate schedule")
+    html = "\n".join(h.value for h in app.get("html"))
+    assert "Day schedule calendar" in html and "Play" in html
+    assert any(e.label == "Show as a list" for e in app.expander)
+    assert any("gaps between tasks aren't counted" in s.value for s in app.success)

@@ -35,8 +35,10 @@ Your final app should:
 - **Your day, your rules.** Set when your day starts, optionally when it ends, and add busy times such as work 9 AM - 5 PM. Nothing is scheduled in a busy time or past the day end, and the AI planner avoids them too.
 - **Edit and delete tasks** in the UI, with due dates shown in the task table.
 - **Clean, guided layout.** The page flows Your day, Pets, AI planner, Tasks, Schedule, and a summary strip shows pets, tasks, scheduled time and conflicts at a glance. The schedule is a timeline that includes busy times and free time, and it stays on screen (with a notice if it goes out of date).
+- **Calendar view.** The schedule is drawn like a calendar: time runs top to bottom, each pet has its own colour, and every block shows its title, time and priority. Long busy stretches such as work are squeezed into a grey band so the rest stays readable, and the same schedule is available as a plain list. The drawing lives in `calendar_view.py` and is tested without a browser.
+- **Time budget.** "Time I can spend on pet care" counts task minutes only. The 5-minute gap between tasks is kept as spacing but is not charged to that budget. The AI is told how many minutes are already used, and when a plan is over budget it is told the total, by how much, and which tasks would be left out.
 - **Accessibility.** Every input has a unique label, delete buttons name what they delete, times use standard 12-hour format, and important text is never in low-contrast caption style. Reviewed against WCAG 2.1 AA; a screen reader pass is still worth doing by hand.
-- **Tested.** 64 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
+- **Tested.** 95 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
 
 ## Getting started
 
@@ -87,7 +89,7 @@ Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If bo
 ### Reliability checks
 
 ```bash
-python -m pytest                      # 64 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
+python -m pytest                      # 95 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
 python -m evals.run_eval              # offline: 4 scenarios x 3 runs with a scripted model
 python -m evals.run_eval --live --repeats 5   # real model (free Gemini tier is rate limited: use fewer repeats if you hit it): pass rate and consistency
 ```
