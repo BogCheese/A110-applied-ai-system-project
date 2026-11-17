@@ -60,6 +60,8 @@ class Task:
     due_date: date = field(default_factory=date.today)  # the day this task needs doing
     pet_name: str = ""  # set by Pet.add_task so a plan can say which pet a task is for
     id: str = field(default_factory=lambda: uuid4().hex)
+    completed_on: date | None = None  # the day it was marked done (set by mark_complete)
+    spawned_task_id: str | None = None  # id of the next occurrence created when it was completed
 
     @property
     def preferred_end(self) -> int | None:
@@ -71,23 +73,28 @@ class Task:
     def mark_complete(self) -> "Task | None":
         """Mark this task done and return the next occurrence if it repeats (else None).
 
-        A DAILY task's next occurrence is due today + 1 day and a WEEKLY task's is due
-        today + 7 days. The returned task is a copy that is not completed and has a new id.
+        A DAILY task's next occurrence is due 1 day later and a WEEKLY task's 7 days later,
+        counted from the later of today and this task's own due date. Counting from today
+        means a task finished late is never handed a due date in the past; counting from the
+        due date means finishing a task that isn't due yet can't create a copy due the same
+        day as itself. The returned task is a copy that is not completed and has a new id.
         It is not stored anywhere; use Pet.complete_task() to add it to the pet.
         """
         self.completed = True
+        self.completed_on = date.today()
 
         days_until_next = RECURRENCE_DAYS.get(self.frequency)
         if days_until_next is None:
             return None
 
-        # Count from today (not the old due date) so a task finished late is never
-        # handed a due date that is already in the past.
         # Copy this task for its next due date: not completed, with a fresh id.
+        start_from = max(date.today(), self.due_date)
         return replace(
             self,
             completed=False,
-            due_date=date.today() + timedelta(days=days_until_next),
+            completed_on=None,
+            spawned_task_id=None,
+            due_date=start_from + timedelta(days=days_until_next),
             id=uuid4().hex,
         )
 
@@ -120,8 +127,8 @@ class Pet:
         if task not in self.tasks:
             raise ValueError(f"{task.title!r} is not one of {self.name}'s tasks")
 
-        # id and pet_name are managed by the system, so they can't be edited.
-        editable = {f.name for f in fields(Task)} - {"id", "pet_name"}
+        # These are managed by the system, so they can't be edited.
+        editable = {f.name for f in fields(Task)} - {"id", "pet_name", "completed_on", "spawned_task_id"}
         unknown = set(changes) - editable
         if unknown:
             raise ValueError(f"Cannot edit unknown task field(s): {sorted(unknown)}")
@@ -138,17 +145,41 @@ class Pet:
 
         Returns the new task, or None for a one-time task or a task that was already
         completed (so a double click can't create duplicates). Raises ValueError if
-        the task does not belong to this pet.
+        the task does not belong to this pet, or is not due yet (finishing tomorrow's
+        copy of a daily task would otherwise create yet another copy, forever).
         """
         if task not in self.tasks:
             raise ValueError(f"{task.title!r} is not one of {self.name}'s tasks")
         if task.completed:
             return None
+        if task.due_date > date.today():
+            raise ValueError(f"{task.title!r} isn't due until {task.due_date:%b %d}, so it can't be marked done yet")
 
         next_task = task.mark_complete()
         if next_task is not None:
             self.add_task(next_task)
+            task.spawned_task_id = next_task.id  # remembered so an undo can take it back
         return next_task
+
+    def reopen_task(self, task: Task) -> None:
+        """Undo complete_task: mark the task not done again.
+
+        If completing it created a next occurrence that hasn't been done yet, that copy is
+        removed, so undoing leaves the list as it was. Does nothing for a task that isn't
+        done. Raises ValueError if the task does not belong to this pet.
+        """
+        if task not in self.tasks:
+            raise ValueError(f"{task.title!r} is not one of {self.name}'s tasks")
+        if not task.completed:
+            return
+
+        task.completed = False
+        task.completed_on = None
+        if task.spawned_task_id is not None:
+            spawned = next((t for t in self.tasks if t.id == task.spawned_task_id), None)
+            if spawned is not None and not spawned.completed:
+                self.tasks.remove(spawned)
+            task.spawned_task_id = None
 
 
 @dataclass
@@ -221,6 +252,11 @@ class ScheduledItem:
         """When the task finishes."""
         return self.start_minute + self.task.duration_minutes
 
+    @property
+    def done(self) -> bool:
+        """True if the task was already finished (it stays on the plan, marked done)."""
+        return self.task.completed
+
 
 @dataclass
 class SkippedItem:
@@ -260,7 +296,7 @@ class DailyPlan:
         for item in self.scheduled_items:
             lines.append(
                 f"{format_time(item.start_minute)} - {format_time(item.end_minute)}  "
-                f"{item.task.title} ({item.task.pet_name})"
+                f"{item.task.title} ({item.task.pet_name})" + (" [done]" if item.done else "")
             )
         lines.append(f"Total: {self.total_minutes} minutes")
 
@@ -329,8 +365,10 @@ class Scheduler:
 
         Rules:
         - Tasks come from owner.get_all_tasks(), so every pet is included.
-        - Only tasks due on or before plan_date (default: today) are considered.
-        - Tasks that are already completed are skipped.
+        - Unfinished tasks due on or before plan_date (default: today) are considered.
+        - Tasks finished on plan_date stay on the plan, marked done, in the slot they would
+          have had, so completing a task never makes it vanish from the day. They are placed
+          first and their minutes still count (that time has been spent).
         - Greedy: take tasks by priority (high first), then shorter duration,
           then pet order, so the result is repeatable. Tradeoff: one long
           high-priority task can use up time that several smaller ones would fit.
@@ -347,22 +385,24 @@ class Scheduler:
         buffer = self.owner.preferences.buffer_minutes
         minutes_left = self.owner.available_minutes
 
-        # Step 1: ignore tasks not due yet and set aside tasks that are already done.
-        to_schedule = []
-        for task in self.owner.get_all_tasks():
-            if task.due_date > plan_date:
-                continue
-            if task.completed:
-                plan.skip(task, "already completed")
-            else:
-                to_schedule.append(task)
+        # Step 1: unfinished tasks that are due, plus tasks finished today (kept, shown as done).
+        to_schedule = self.tasks_in_plan(plan_date)
 
-        # Step 2: highest priority first, shorter tasks first within a priority.
-        # sort() is stable, so ties keep the owner's pet order.
-        to_schedule.sort(key=lambda task: (-task.priority_value(), task.duration_minutes))
+        # Step 2: finished tasks first (they already happened), then highest priority first and
+        # shorter tasks first within a priority. sort() is stable, so ties keep the pet order.
+        to_schedule.sort(key=lambda task: (not task.completed, -task.priority_value(), task.duration_minutes))
 
         # Step 3: place each task if it fits in the time that is left.
         for task in to_schedule:
+            if task.completed:
+                # Already done: always keep it on the plan; just record the time it used.
+                chosen = self._choose_start(plan, task, buffer)
+                if chosen is not None:
+                    start, placement = chosen
+                    plan.add_item(task, start, f"done, {placement}")
+                    minutes_left = max(0, minutes_left - task.duration_minutes)
+                continue
+
             # Only the task's own minutes count against the owner's available time. The
             # gap between tasks is spacing, not time spent on care, so it is not charged.
             if task.duration_minutes > minutes_left:
@@ -396,6 +436,20 @@ class Scheduler:
     def _is_pending(self, task: Task, plan_date: date) -> bool:
         """True if the task is due on or before plan_date and not yet completed."""
         return task.due_date <= plan_date and not task.completed
+
+    @staticmethod
+    def finished_on(task: Task, plan_date: date) -> bool:
+        """True if the task was marked done on plan_date (older tasks without a record use their due date)."""
+        return task.completed and (task.completed_on or task.due_date) == plan_date
+
+    def tasks_in_plan(self, plan_date: date | None = None) -> list[Task]:
+        """The tasks a plan for plan_date covers: unfinished ones due by then, plus ones finished that day."""
+        plan_date = plan_date or date.today()
+        return [
+            task
+            for task in self.owner.get_all_tasks()
+            if self._is_pending(task, plan_date) or self.finished_on(task, plan_date)
+        ]
 
     def _choose_start(self, plan: DailyPlan, task: Task, buffer: int) -> tuple[int, str] | None:
         """Pick a start time for the task and describe how it was chosen (None if nothing fits)."""

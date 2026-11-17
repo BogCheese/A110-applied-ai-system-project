@@ -354,7 +354,7 @@ def describe_context(owner: Owner) -> str:
         busy = f" The owner is busy (no tasks possible) during: {blocks}."
     buffer = owner.preferences.buffer_minutes
     gap = f" Leave at least {buffer} minute(s) between tasks." if buffer else ""
-    used = sum(t.duration_minutes for t in owner.get_all_tasks() if not t.completed and t.due_date <= date.today())
+    used = sum(t.duration_minutes for t in Scheduler(owner).tasks_in_plan())  # includes tasks finished today
     left = max(0, owner.available_minutes - used)
     return (
         "Pets:\n" + "\n".join(pet_lines) + "\n\n"
@@ -556,15 +556,13 @@ class PlannerAgent:
 
         # Total task time vs the owner's minutes: say it once, with the numbers, instead of
         # repeating "needs X but only Y left" for every task that got squeezed out.
-        total = sum(t.duration_minutes for t in trial.get_all_tasks() if scheduler._is_pending(t, date.today()))
+        total = sum(t.duration_minutes for t in scheduler.tasks_in_plan())
         over_budget = total > owner.available_minutes
         plan = scheduler.generate_plan()
 
         def blamed(skipped) -> bool:
             """True if this skipped task is new, or was fitting before the new tasks arrived."""
-            return skipped.reason != "already completed" and (
-                skipped.task.id in new_ids or skipped.task.id not in baseline_skipped
-            )
+            return skipped.task.id in new_ids or skipped.task.id not in baseline_skipped
 
         if over_budget:
             dropped = [

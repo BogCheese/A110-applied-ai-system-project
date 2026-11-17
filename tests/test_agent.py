@@ -300,3 +300,23 @@ def test_context_tells_the_model_how_many_minutes_are_left(owner):
     owner.pets[0].add_task(Task("Feeding", 25, Priority.HIGH))
     text = describe_context(owner)
     assert "already use 25 of those minutes, so 35 minutes remain" in text
+
+
+def test_finished_tasks_count_toward_the_minutes_already_used(owner):
+    from pawpal_agent import describe_context
+
+    done = Task("Done meal", 25, Priority.HIGH)
+    owner.pets[0].add_task(done)
+    done.mark_complete()
+    owner.pets[0].add_task(Task("Open", 10, Priority.LOW))
+    assert "already use 35 of those minutes, so 25 minutes remain" in describe_context(owner)
+
+
+def test_planner_budget_check_includes_tasks_finished_today(owner):
+    done = Task("Done meal", 50, Priority.HIGH)
+    owner.pets[0].add_task(done)
+    done.mark_complete()  # 50 of the 60 minutes are already spent
+    llm = FakeLLM(reply(("Mia", "Walk", 30, "high", "once", None)), reply(("Mia", "Walk", 10, "high", "once", None)))
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.attempts == 2 and result.success
+    assert "over by 20" in llm.calls[1][-1]["content"]

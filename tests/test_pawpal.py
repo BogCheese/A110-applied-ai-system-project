@@ -232,16 +232,18 @@ def test_higher_priority_task_wins_when_time_is_short():
     assert [item.task for item in plan.skipped_items] == [low]
 
 
-def test_completed_task_is_skipped_with_a_reason():
+def test_task_finished_today_stays_on_the_plan_marked_done():
     owner, buddy, _ = make_owner()
-    walk = Task("Walk", 30, Priority.HIGH)
+    walk = Task("Walk", 30, Priority.HIGH, preferred_time=9 * 60)
     buddy.add_task(walk)
     walk.mark_complete()
 
     plan = Scheduler(owner).generate_plan()
 
-    assert plan.scheduled_items == []
-    assert plan.skipped_items[0].reason == "already completed"
+    assert plan.skipped_items == []
+    item = plan.scheduled_items[0]
+    assert item.task is walk and item.done and item.start_minute == 9 * 60  # it keeps its slot
+    assert "[done]" in plan.display()
 
 
 def test_sort_by_time_handles_empty_list_and_does_not_change_the_original():
@@ -398,3 +400,165 @@ def test_skip_reason_names_the_owners_total_minutes():
     pet.add_task(Task("Long hike", 30, Priority.HIGH))
     reason = Scheduler(owner).generate_plan().skipped_items[0].reason
     assert "needs 30 min but only 20 min left of your 20 minutes" in reason
+
+
+# ---- finished tasks stay on the schedule ----
+
+def test_done_task_keeps_its_slot_so_other_tasks_do_not_shift_into_it():
+    owner, pet = _owner_with_one_pet()
+    walk = Task("Walk", 30, Priority.HIGH)  # no preferred time: earliest slot, 8:00
+    pet.add_task(walk)
+    brush = Task("Brush", 15, Priority.LOW)
+    pet.add_task(brush)
+    before = {i.task.title: i.start_minute for i in Scheduler(owner).generate_plan().scheduled_items}
+
+    walk.mark_complete()
+    after = {i.task.title: i.start_minute for i in Scheduler(owner).generate_plan().scheduled_items}
+
+    assert after == before  # marking done changed nothing about where anything sits
+
+
+def test_done_task_is_never_dropped_even_when_time_is_tight():
+    owner, pet = _owner_with_one_pet(minutes=40)
+    done = Task("Low priority chore", 30, Priority.LOW)
+    pet.add_task(done)
+    done.mark_complete()
+    pet.add_task(Task("Urgent", 30, Priority.HIGH))  # only 10 minutes remain after the done task
+
+    plan = Scheduler(owner).generate_plan()
+
+    assert [i.task.title for i in plan.scheduled_items] == ["Low priority chore"]  # the done one is kept
+    assert "Urgent" in plan.skipped_items[0].task.title  # time already spent counts
+
+
+def test_task_finished_on_an_earlier_day_is_not_on_todays_plan():
+    owner, pet = _owner_with_one_pet()
+    old = Task("Old", 10, Priority.LOW)
+    pet.add_task(old)
+    old.mark_complete()
+    old.completed_on = date.today() - timedelta(days=1)
+
+    plan = Scheduler(owner).generate_plan()
+
+    assert plan.scheduled_items == [] and plan.skipped_items == []
+
+
+def test_tasks_in_plan_covers_due_pending_and_finished_today_only():
+    owner, pet = _owner_with_one_pet()
+    due = Task("Due", 10, Priority.LOW)
+    later = Task("Later", 10, Priority.LOW, due_date=date.today() + timedelta(days=2))
+    done = Task("Done", 10, Priority.LOW)
+    for t in (due, later, done):
+        pet.add_task(t)
+    done.mark_complete()
+    assert Scheduler(owner).tasks_in_plan() == [due, done]
+
+
+def test_conflicts_still_ignore_finished_tasks():
+    owner, pet = _owner_with_one_pet()
+    done = Task("Done", 30, Priority.HIGH, preferred_time=9 * 60)
+    pet.add_task(done)
+    done.mark_complete()
+    pet.add_task(Task("Next", 30, Priority.HIGH, preferred_time=9 * 60))
+    assert Scheduler(owner).detect_conflicts() == []
+
+
+# ---- completing tasks: no endless copies ----
+
+def test_a_task_that_is_not_due_yet_cannot_be_marked_done():
+    pet = Pet("Buddy", "dog")
+    tomorrows = Task("Walk", 30, Priority.HIGH, Frequency.DAILY, due_date=date.today() + timedelta(days=1))
+    pet.add_task(tomorrows)
+
+    with pytest.raises(ValueError, match="isn't due until"):
+        pet.complete_task(tomorrows)
+
+    assert tomorrows.completed is False and len(pet.tasks) == 1  # nothing changed
+
+
+def test_completing_over_and_over_never_piles_up_copies():
+    """The reported bug: every completion made a new copy due tomorrow, which could be completed again."""
+    pet = Pet("Nala", "cat")
+    feeding = Task("Morning Feeding", 15, Priority.HIGH, Frequency.DAILY)
+    pet.add_task(feeding)
+
+    first = pet.complete_task(feeding)
+    for _ in range(5):  # keep trying to complete whatever is left
+        for task in list(pet.tasks):
+            if not task.completed:
+                try:
+                    pet.complete_task(task)
+                except ValueError:
+                    pass
+
+    assert first.due_date == date.today() + timedelta(days=1)
+    assert len(pet.tasks) == 2  # the done one and exactly one copy for tomorrow
+    assert [t.completed for t in pet.tasks] == [True, False]
+
+
+def test_mark_complete_counts_the_next_date_from_a_future_due_date():
+    future = Task("Walk", 30, Priority.HIGH, Frequency.DAILY, due_date=date.today() + timedelta(days=3))
+    nxt = future.mark_complete()  # called directly, bypassing Pet's guard
+    assert nxt.due_date == date.today() + timedelta(days=4)  # never the same day as the task it came from
+
+
+def test_completing_records_the_day_and_links_the_next_copy():
+    pet = Pet("Buddy", "dog")
+    walk = Task("Walk", 30, Priority.HIGH, Frequency.WEEKLY)
+    pet.add_task(walk)
+    nxt = pet.complete_task(walk)
+    assert walk.completed_on == date.today() and walk.spawned_task_id == nxt.id
+    assert nxt.completed_on is None and nxt.spawned_task_id is None  # the copy starts clean
+
+
+def test_system_managed_fields_cannot_be_edited():
+    pet = Pet("Buddy", "dog")
+    walk = Task("Walk", 30, Priority.HIGH)
+    pet.add_task(walk)
+    for field_name in ("completed_on", "spawned_task_id", "id", "pet_name"):
+        with pytest.raises(ValueError):
+            pet.edit_task(walk, **{field_name: "x"})
+
+
+# ---- undoing a completion ----
+
+def test_reopening_a_repeating_task_removes_the_copy_it_created():
+    pet = Pet("Buddy", "dog")
+    walk = Task("Walk", 30, Priority.HIGH, Frequency.DAILY)
+    pet.add_task(walk)
+    pet.complete_task(walk)
+
+    pet.reopen_task(walk)
+
+    assert walk.completed is False and walk.completed_on is None and walk.spawned_task_id is None
+    assert pet.tasks == [walk]  # back exactly as it was
+
+
+def test_reopening_a_one_time_task_just_unchecks_it():
+    pet = Pet("Buddy", "dog")
+    vet = Task("Vet", 60, Priority.HIGH, Frequency.ONCE)
+    pet.add_task(vet)
+    pet.complete_task(vet)
+    pet.reopen_task(vet)
+    assert vet.completed is False and pet.tasks == [vet]
+
+
+def test_reopening_can_be_followed_by_completing_again_without_extra_copies():
+    pet = Pet("Buddy", "dog")
+    walk = Task("Walk", 30, Priority.HIGH, Frequency.DAILY)
+    pet.add_task(walk)
+    for _ in range(3):
+        pet.complete_task(walk)
+        pet.reopen_task(walk)
+    pet.complete_task(walk)
+    assert len(pet.tasks) == 2  # still the original plus exactly one copy
+
+
+def test_reopening_a_task_that_is_not_done_does_nothing_and_foreign_tasks_are_rejected():
+    pet = Pet("Buddy", "dog")
+    walk = Task("Walk", 30, Priority.HIGH)
+    pet.add_task(walk)
+    pet.reopen_task(walk)
+    assert walk.completed is False and pet.tasks == [walk]
+    with pytest.raises(ValueError):
+        pet.reopen_task(Task("Other", 5, Priority.LOW))
