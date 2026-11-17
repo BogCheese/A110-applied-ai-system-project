@@ -100,17 +100,6 @@ def test_every_input_has_a_unique_label(app):
 
 # ---- AI planner ----
 
-def test_planner_adds_tasks_and_keeps_trace_after_other_clicks(app):
-    app.text_area[0].set_value("plan Nala's day").run()
-    click(app, "Plan with AI")
-    assert not app.exception
-    assert [t.title for t in app.session_state.owner.pets[0].tasks] == ["Feeding"]
-    assert any(e.label == "What the agent did" for e in app.expander)
-
-    click(app, "Generate schedule")  # a later click must not erase the trace
-    assert any(e.label == "What the agent did" for e in app.expander)
-
-
 def test_running_the_planner_twice_does_not_duplicate_tasks(app):
     app.text_area[0].set_value("plan").run()
     click(app, "Plan with AI")
@@ -225,33 +214,6 @@ def test_mark_complete_creates_the_next_occurrence(app):
 
 # ---- schedule ----
 
-def test_generated_schedule_persists_and_flags_when_out_of_date(app):
-    pet = app.session_state.owner.pets[0]
-    pet.add_task(Task("Play", 30, Priority.HIGH, Frequency.ONCE))
-    app.run()
-    click(app, "Generate schedule")
-    assert any("Scheduled 1 task(s)" in s.value for s in app.success)
-
-    app.run()  # an unrelated re-run must not erase it
-    assert any("Scheduled 1 task(s)" in s.value for s in app.success)
-    assert not any("changed since" in w.value for w in app.warning)
-
-    pet.add_task(Task("Brush", 10, Priority.LOW, Frequency.ONCE))
-    app.run()
-    assert any("changed since this schedule was built" in w.value for w in app.warning)
-
-
-def test_schedule_timeline_shows_busy_time_and_free_time(app):
-    owner = app.session_state.owner
-    owner.add_busy_block(9 * 60, 17 * 60)
-    owner.pets[0].add_task(Task("Walk", 30, Priority.HIGH, Frequency.ONCE))
-    app.run()
-    click(app, "Generate schedule")
-    text = page_text(app)
-    assert "**8:00 AM – 8:30 AM** · Walk (Nala)" in text
-    assert "Free time" in text and "Busy, no tasks" in text
-
-
 def test_no_sidebar_and_owner_name_is_editable(app):
     assert len(app.sidebar) == 0  # everything lives on the main page
     name_box = [t for t in app.text_input if t.label == "Pet Owner"][0]
@@ -260,14 +222,157 @@ def test_no_sidebar_and_owner_name_is_editable(app):
     assert app.session_state.owner.name == "Brandon"
 
 
-def test_schedule_is_drawn_as_a_calendar_with_a_list_alternative(app):
+def calendar_html(at):
+    return "\n".join(h.value for h in at.get("html"))
+
+
+# ---- AI planner (trace stays visible) ----
+
+def test_planner_adds_tasks_and_keeps_trace_after_other_clicks(app):
+    app.text_area[0].set_value("plan Nala's day").run()
+    click(app, "Plan with AI")
+    assert not app.exception
+    assert [t.title for t in app.session_state.owner.pets[0].tasks] == ["Feeding"]
+    assert any(e.label == "What the agent did" for e in app.expander)
+
+    pick(app, "Day ends at (optional)", "9:00 PM")  # a later interaction must not erase the trace
+    assert any(e.label == "What the agent did" for e in app.expander)
+
+
+# ---- the schedule builds itself ----
+
+def test_there_is_no_generate_button_and_the_schedule_appears_by_itself(app):
+    assert "Generate schedule" not in [b.label for b in app.button]
+    assert "Day schedule calendar" not in calendar_html(app)  # no tasks yet
     app.session_state.owner.pets[0].add_task(Task("Play", 30, Priority.HIGH, Frequency.ONCE))
     app.run()
-    click(app, "Generate schedule")
-    html = "\n".join(h.value for h in app.get("html"))
-    assert "Day schedule calendar" in html and "Play" in html
-    assert not app.metric  # no summary strip on the page
-    text = page_text(app)
-    assert "List view" in text and "Play (Nala)" in text
-    assert "placed at its preferred time" not in text  # the list stays short: no "why" text
+    assert "Day schedule calendar" in calendar_html(app) and "Play" in calendar_html(app)
+    assert any("Scheduled 1 task(s)" in s.value for s in app.success)
     assert any("gaps between tasks aren't counted" in s.value for s in app.success)
+
+
+def test_schedule_follows_changes_without_any_click(app):
+    pet = app.session_state.owner.pets[0]
+    pet.add_task(Task("Play", 30, Priority.HIGH, Frequency.ONCE))
+    app.run()
+    pet.add_task(Task("Brush", 10, Priority.LOW, Frequency.ONCE))
+    app.run()
+    assert "Brush" in calendar_html(app) and any("Scheduled 2 task(s)" in s.value for s in app.success)
+
+
+def test_schedule_timeline_shows_busy_time_and_free_time(app):
+    owner = app.session_state.owner
+    owner.add_busy_block(9 * 60, 17 * 60)
+    owner.pets[0].add_task(Task("Walk", 30, Priority.HIGH, Frequency.ONCE))
+    app.run()
+    text = page_text(app)
+    assert "**8:00 AM – 8:30 AM** · Walk (Nala)" in text
+    assert "Free time" in text and "Busy, no tasks" in text
+    assert not app.metric  # no summary strip on the page
+    assert "List view" in text and "placed at its preferred time" not in text
+
+
+def test_before_any_pet_the_right_side_invites_you_to_start():
+    at = AppTest.from_file(APP_PATH, default_timeout=30).run()
+    assert "Your schedule will appear here" in page_text(at)
+    assert "Day schedule calendar" not in calendar_html(at)
+
+
+# ---- tasks grouped by pet ----
+
+def test_tasks_are_grouped_by_pet_with_time_first_and_priority_badges(app):
+    owner = app.session_state.owner
+    owner.add_pet(Pet("Mocha", "dog"))
+    owner.pets[0].add_task(Task("Late brush", 10, Priority.LOW, Frequency.WEEKLY, preferred_time=18 * 60))
+    owner.pets[0].add_task(Task("Early feed", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
+    owner.pets[1].add_task(Task("Walk", 20, Priority.MEDIUM, Frequency.DAILY))
+    app.run()
+    tables = [t.value for t in app.table]
+    assert len(tables) == 2  # one per pet
+    nala, mocha = tables
+    assert list(nala.columns)[0] == "Time"
+    assert list(nala["Task"]) == ["Early feed", "Late brush"]  # earliest first
+    assert list(nala["Priority"]) == [":red-badge[High]", ":green-badge[Low]"]
+    assert list(mocha["Time"]) == ["Any time"] and mocha["Priority"][0] == ":orange-badge[Medium]"
+
+
+def test_status_filter_narrows_the_tables(app):
+    pet = app.session_state.owner.pets[0]
+    pet.add_task(Task("Open", 10, Priority.LOW, Frequency.ONCE))
+    finished = Task("Finished", 10, Priority.LOW, Frequency.ONCE)
+    pet.add_task(finished)
+    finished.completed = True
+    app.run()
+    assert len(app.table[0].value) == 2
+    app.segmented_control[0].set_value("Done").run()
+    assert list(app.table[0].value["Task"]) == ["Finished"]
+    app.segmented_control[0].set_value("To do").run()
+    assert list(app.table[0].value["Task"]) == ["Open"]
+
+
+def test_task_titles_with_markdown_characters_are_shown_literally(app):
+    app.session_state.owner.pets[0].add_task(Task("50% *off* $5", 10, Priority.LOW, Frequency.ONCE))
+    app.run()
+    assert app.table[0].value["Task"][0] == "50% \\*off\\* \\$5"
+
+
+# ---- pet cards ----
+
+def test_pet_can_be_deleted_after_confirming(app):
+    app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
+    app.run()
+    click(app, "Delete Nala")
+    assert app.session_state.owner.pets  # nothing happens until confirmed
+    assert "Delete **Nala** and 1 task(s)?" in page_text(app)
+    click(app, "Yes, delete")
+    assert app.session_state.owner.pets == []
+    assert any("Deleted Nala" in t.value for t in app.toast)
+    assert "Your schedule will appear here" in page_text(app)
+
+
+def test_cancelling_a_pet_deletion_keeps_the_pet(app):
+    click(app, "Delete Nala")
+    click(app, "Cancel")
+    assert [p.name for p in app.session_state.owner.pets] == ["Nala"]
+    assert "Delete Nala" in [b.label for b in app.button]  # back to the normal card
+
+
+# ---- start over ----
+
+def test_start_over_clears_everything_after_confirming(app):
+    app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
+    app.text_area[0].set_value("some goal").run()
+    pick(app, "Day starts at", "9:30 AM")
+    click(app, "Start over")
+    assert app.session_state.owner.pets  # asks first
+    assert "Start over?" in page_text(app)
+    click(app, "Yes, start over")
+    owner = app.session_state.owner
+    assert owner.pets == [] and owner.day_start_minute == 8 * 60
+    assert not app.text_area  # the planner box is hidden until there is a pet again
+    assert "planner_goal" not in app.session_state  # and its text is gone
+
+
+def test_cancelling_start_over_keeps_your_data(app):
+    click(app, "Start over")
+    click(app, "Cancel")
+    assert [p.name for p in app.session_state.owner.pets] == ["Nala"]
+    assert "Start over?" not in page_text(app)
+
+
+# ---- theme ----
+
+def test_theme_file_is_valid_and_primary_colour_is_readable_with_white_text():
+    import tomllib
+
+    config = tomllib.loads((Path(APP_PATH).parent / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+    theme = config["theme"]
+
+    def luminance(hex_colour):
+        channels = [int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    contrast = 1.05 / (luminance(theme["primaryColor"]) + 0.05)  # white text on the primary colour
+    assert contrast >= 4.5, f"primary colour contrast is only {contrast:.2f}:1"
+    assert "light" in theme and "dark" in theme  # both appearances are styled
