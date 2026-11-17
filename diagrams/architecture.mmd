@@ -1,16 +1,88 @@
+%% PawPal+ system diagram: components, data flow, and where humans / tests check the AI.
+%% Render: paste into https://mermaid.live or view on GitHub.
 flowchart TD
-    User([User]) --> UI[Streamlit UI<br/>app.py]
-    UI -->|manual tasks| Logic
-    UI -->|goal in plain English| Agent[PlannerAgent<br/>pawpal_agent.py]
-    Agent -->|1 plan| LLM[(LLM API (Gemini or Claude))]
-    LLM -->|JSON tasks| Guard[Guardrails<br/>validate_tasks]
-    Guard -->|2 valid tasks| Trial[Dry run on a copy of the Owner]
-    Trial -->|3 check| Sched[Scheduler:<br/>detect_conflicts, generate_plan]
-    Sched -->|problems| Agent
-    Agent -->|4 commit when checks pass| Logic[PawPal logic layer<br/>pawpal_system.py]
-    Logic --> Sched
-    Sched --> UI
-    Agent -.-> Log[(pawpal.log)]
-    Eval[evals/run_eval.py<br/>scenarios + scores] -.->|runs| Agent
-    Tests[pytest suite<br/>tests/] -.-> Logic
-    Tests -.-> Agent
+
+    subgraph INPUT["INPUT"]
+        User(["Pet owner"])
+        Goal["Goal in plain English<br/>e.g. 'I just adopted a puppy'"]
+        Manual["Manual tasks, pets,<br/>day hours, busy times"]
+    end
+
+    subgraph APP["STREAMLIT APP  (app.py, app_pages/, ui.py)"]
+        UI["3 pages: Schedule, Plan with AI, Day and pets"]
+    end
+
+    subgraph AGENT["AGENT  (pawpal_agent.py, PlannerAgent)"]
+        Plan["1 PLAN<br/>ask the LLM for tasks as JSON"]
+        Guard["2 VALIDATE (guardrails)<br/>reject unknown pet, bad duration,<br/>bad priority, duplicates"]
+        Dry["3 ACT on a COPY of the owner<br/>(dry run, real data untouched)"]
+        Check["4 CHECK with the Scheduler<br/>new conflicts? tasks that do not fit?"]
+        Commit["5 COMMIT to the real owner<br/>(best attempt; leftover issues are flagged)"]
+        Fail["No usable reply from the model:<br/>owner left unchanged, error shown"]
+    end
+
+    LLM[("LLM API<br/>Gemini or Claude")]
+
+    subgraph CORE["LOGIC LAYER  (pawpal_system.py)"]
+        Data["Owner, Pet, Task"]
+        Sched["Scheduler<br/>detect_conflicts, generate_plan"]
+    end
+
+    subgraph OUTPUT["OUTPUT"]
+        View["Today's schedule:<br/>calendar + list view with checkboxes"]
+        Trace["'What the agent did' trace<br/>attempts, rejected items, problems found"]
+    end
+
+    subgraph REVIEW["HUMAN CHECKPOINTS"]
+        H1{"Owner reads the trace<br/>and the new tasks"}
+        H2["Owner edits, deletes, ticks done,<br/>or undoes a task"]
+    end
+
+    subgraph TESTING["TESTING AND EVALUATION  (automated)"]
+        Pytest["pytest suite, 148 tests<br/>logic, agent, UI flows, calendar"]
+        Eval["evals/run_eval.py<br/>scenarios x repeats, scored by the Scheduler<br/>(offline fake model or --live)"]
+    end
+
+    Log[("pawpal.log")]
+
+    %% input -> process
+    User --> Goal --> UI
+    User --> Manual --> UI
+    UI -->|manual tasks| Data
+    UI -->|goal text| Plan
+
+    %% agent loop
+    Plan <-->|prompt / JSON reply| LLM
+    Plan --> Guard
+    Guard -->|rejections fed back| Plan
+    Guard -->|valid tasks| Dry
+    Dry --> Check
+    Check -->|problems fed back, revise| Plan
+    Check -->|no problems, or revisions used up| Commit
+    Plan -->|never returned usable JSON| Fail
+    Commit --> Data
+    Dry -.->|uses| Sched
+    Check -.->|uses| Sched
+
+    %% process -> output
+    Data --> Sched --> View
+    Commit --> Trace
+    Fail --> Trace
+    View --> UI
+    Trace --> UI
+
+    %% humans in the loop
+    UI --> H1
+    H1 -->|looks wrong| H2
+    H1 -->|looks right| View
+    H2 -->|changes| Data
+
+    %% logging and automated checks
+    Plan -.-> Log
+    Check -.-> Log
+    Pytest -.->|tests| Data
+    Pytest -.->|tests| Sched
+    Pytest -.->|tests, fake LLM| Guard
+    Eval -.->|runs the agent| Plan
+    Eval -.->|scores results| Sched
+    Eval -.->|report read by| H1

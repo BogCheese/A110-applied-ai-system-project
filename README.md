@@ -1,286 +1,236 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ — a pet-care scheduler with a self-checking AI planner
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+**Code:** https://github.com/BogCheese/A110-applied-ai-system-project · **Design and reflection:** [model_card.md](model_card.md) · **Diagram:** [diagrams/architecture.mmd](diagrams/architecture.mmd) · **Captured run logs:** [evals/sample_output.txt](evals/sample_output.txt)
 
-## Scenario
+**Original project (Modules 1-3): PawPal+.** The original PawPal+ was a Streamlit app that helped a busy pet owner plan daily care for their pets. The owner entered pets and care tasks (walks, feeding, meds, grooming), each with a duration and priority. A pure-Python scheduler then built a daily plan within the owner's available minutes and explained why each task was included or skipped. This final version keeps that scheduler and adds an AI planning agent, a reliability evaluation, and a redesigned multi-page interface.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+## What it does and why it matters
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+You describe a goal in plain English, such as *"I just adopted a puppy, set up a daily care routine"*, and PawPal+ adds real, scheduled care tasks to your pets. It then shows them on a calendar and a checklist.
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+Language models are good at drafting plans and unreliable at making them *fit* (overlapping times, more minutes than the day has, invented pets). PawPal+ does not trust the model's own judgment. Every AI proposal is validated by guardrails, tried on a copy of your data, and checked by the same deterministic scheduler the rest of the app uses. Problems go back to the model for revision, and nothing touches your real data until the checks run. The point of the project is that pattern: **let the AI propose, let ordinary tested code verify, and keep a human in control.**
 
-## What you will build
+## Architecture overview
 
-Your final app should:
+The full diagram is in [diagrams/architecture.mmd](diagrams/architecture.mmd); the class diagram is [diagrams/uml.mmd](diagrams/uml.mmd). A condensed view:
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+```mermaid
+flowchart LR
+    User([Owner]) -->|goal in plain English| UI[Streamlit app<br/>app.py, app_pages/, ui.py]
+    User -->|pets, tasks, day hours| UI
+    UI -->|goal| Agent
+    subgraph Agent["PlannerAgent (pawpal_agent.py)"]
+        direction TB
+        P[1 Plan: LLM proposes tasks as JSON] --> V[2 Validate: guardrails]
+        V --> A[3 Act: dry run on a copy]
+        A --> C[4 Check: Scheduler finds conflicts and overflow]
+        C -->|problems, up to 3 revisions| P
+    end
+    P <--> LLM[(Gemini or Claude)]
+    C -->|checks pass, or best attempt| Core[Logic layer<br/>Owner, Pet, Task, Scheduler]
+    UI -->|manual edits| Core
+    Core --> View[Calendar, list view, agent trace]
+    View --> Human{Owner reviews<br/>edits, deletes, undoes}
+    Human --> Core
+    Tests[pytest, 148 tests] -.-> Core
+    Tests -.-> Agent
+    Eval[evals/run_eval.py] -.->|scores| Agent
+```
 
-## Features
+- **Input:** a plain-English goal, or manual pets, tasks, day hours and busy times.
+- **Process:** `PlannerAgent` runs plan → validate → act on a copy → check → revise. The checks use `Scheduler.detect_conflicts()` and `Scheduler.generate_plan()`, so the verifier is ordinary code with its own tests, not the model.
+- **Output:** a calendar and list view of today, plus a "What the agent did" trace listing each attempt, rejection and problem found.
+- **Humans:** the owner reads the trace and the new tasks and can edit, delete, tick done or undo any task. Humans also read the eval report.
+- **Automated checks:** pytest covers the logic, the agent (with a scripted fake model), the pages and the calendar. `evals/run_eval.py` replays fixed scenarios and scores each result with the scheduler.
 
-- **Multiple pets, one schedule.** An owner can have any number of pets, and the scheduler reads every pet's tasks together through `Owner.get_all_tasks()`.
-- **Priority-based daily plan.** Tasks are chosen greedily: high priority first, then shorter tasks, then pet order, until the owner's available minutes run out. Tasks that don't fit are skipped with a reason.
-- **Preferred times with a fallback.** A task is placed at its preferred time if that slot is free. Otherwise it goes in the earliest free slot after the day's start time.
-- **Sorting by time.** Tasks can be listed in time order, with tasks that have no preferred time last (`Scheduler.sort_by_time()`).
-- **Filtering.** Tasks can be filtered by pet, by completion status, or both (`Owner.filter_tasks()`).
-- **Conflict warnings.** Tasks whose preferred times overlap, for the same pet or different pets, produce a readable warning instead of an error (`Scheduler.detect_conflicts()`).
-- **Daily and weekly recurrence.** Completing a repeating task creates the next one, due tomorrow (daily) or in 7 days (weekly). Completing the same task twice does not create duplicates.
-- **Explained plans.** Every scheduled and skipped task comes with a plain-language reason (`Scheduler.explain_plan()`).
-- **Your day, your rules.** Set when your day starts, optionally when it ends, and add busy times such as work 9 AM - 5 PM. Nothing is scheduled in a busy time or past the day end, and the AI planner avoids them too.
-- **Edit and delete tasks** in the UI, with due dates shown in the task table.
-- **Wide layout.** Your day and your pets sit side by side at the top; the AI planner, today's schedule and your tasks follow below as you scroll. Pets appear as cards you can delete (after a confirmation), and **Start over** clears everything. On a phone everything stacks into one column.
-- **The schedule builds itself.** There is no Generate button: the schedule on the right is rebuilt on every change. It is a timeline of your tasks and busy times.
-- **Night mode.** A toggle in the header switches the page to dark colours. Streamlit can't change its theme from Python, so the toggle uses a small CSS filter (invert plus a hue turn, in `NIGHT_MODE_CSS` in `ui.py`). It switches itself off when Streamlit's own dark theme is already active (from its Settings menu or your computer's dark mode), so the page never flips back to light.
-- **Themed look.** Colours, fonts and rounded corners come from `.streamlit/config.toml` (a teal accent on a white page, with a matching dark theme), not from CSS in the code.
-- **Calendar view.** The schedule is drawn like a calendar: time runs top to bottom, each pet has its own colour, and every block shows its title, time and priority. Long busy stretches such as work are squeezed into a grey band so the rest stays readable, and the same schedule is available as a plain list. The drawing lives in `calendar_view.py` and is tested without a browser.
-- **Time budget.** "Time I can spend on pet care" counts task minutes only. The 5-minute gap between tasks is kept as spacing but is not charged to that budget. The AI is told how many minutes are already used, and when a plan is over budget it is told the total, by how much, and which tasks would be left out.
-- **Accessibility.** Every input has a unique label, delete buttons name what they delete, times use standard 12-hour format, and important text is never in low-contrast caption style. Reviewed against WCAG 2.1 AA; a screen reader pass is still worth doing by hand.
-- **Tested.** 146 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
+| File | Role |
+|------|------|
+| `pawpal_system.py` | Data classes and the `Scheduler` (no Streamlit, no AI) |
+| `pawpal_agent.py` | `PlannerAgent`, guardrails, Gemini and Claude clients behind one small `LLMClient` interface |
+| `app.py`, `app_pages/`, `ui.py` | Streamlit entry point, three pages (Schedule, Plan with AI, Day & pets), shared helpers |
+| `calendar_view.py` | Draws the calendar as HTML, tested without a browser |
+| `evals/run_eval.py` | Reliability harness |
+| `tests/` | 148 tests |
 
-## Getting started
+## Setup
 
-### Setup
+Requires Python 3.10 or newer (developed on 3.13).
 
 ```bash
+git clone https://github.com/BogCheese/A110-applied-ai-system-project.git
+cd A110-applied-ai-system-project
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-### Suggested workflow
+Everything except the AI planner works with no key. To enable the planner:
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+1. Get a free Gemini key at https://aistudio.google.com/apikey.
+2. Copy `.env.example` to `.env` and put the key in it (`GEMINI_API_KEY=...`). `.env` is git-ignored.
+3. Restart the app.
 
-## AI Planning Agent
+To use Claude instead, run `pip install anthropic` and set `ANTHROPIC_API_KEY`. If both keys are set, choose with `PAWPAL_PROVIDER=gemini|anthropic`; override the model with `PAWPAL_MODEL`.
 
-Type a goal like *"I just adopted a puppy, set up a daily care routine"* and the agent adds real tasks to your pets. It is an **agentic workflow** (plan, act, check, revise) and the checks are PawPal's own scheduler, not the model's opinion. See [diagrams/architecture.mmd](diagrams/architecture.mmd).
-
-1. **Plan**: The model (Gemini or Claude) proposes tasks as JSON.
-2. **Validate (guardrails)**: unknown pets, bad durations, priorities, or times are rejected and reported back to the model. A task that duplicates an existing one (same pet, title and time) is skipped; a second feeding at a different time is fine.
-3. **Act on a copy**: tasks are added to a dry-run copy of your data.
-4. **Check**: `Scheduler.detect_conflicts()` and `Scheduler.generate_plan()` find new conflicts and tasks that don't fit your minutes, and times that fall in a busy block or outside your day.
-5. **Revise**: problems go back to the model, up to 3 times. Only then are tasks added to your real pets. If problems remain, they are shown to you instead of hidden.
-
-Gemini calls retry automatically when the service is busy or rate limited. If the API is down or the model never returns a usable plan, you get an error message and your data is unchanged. Everything is logged to `pawpal.log`.
-
-### AI setup
-
-PawPal+ works with Google Gemini (free tier) or Anthropic Claude. Get a free Gemini key at https://aistudio.google.com/apikey, then:
-
-Easiest: copy `.env.example` to a file named `.env` in the project folder (it is git-ignored, so your key is never committed), and put your key in it:
-
-```
-GEMINI_API_KEY=your-key-here
-```
-
-Then run `streamlit run app.py`. The app loads `.env` automatically. Setting `GEMINI_API_KEY` in your shell also works and takes priority over the file.
-
-Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If both keys are set, choose with `PAWPAL_PROVIDER=gemini|anthropic`. Override the model with `PAWPAL_MODEL` (defaults: `gemini-3.5-flash`, `claude-haiku-5-5`). The rest of the app works without a key.
-
-### Reliability checks
+Other commands:
 
 ```bash
-python -m pytest                      # 146 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
-python -m evals.run_eval              # offline: 4 scenarios x 3 runs with a scripted model
-python -m evals.run_eval --live --repeats 5   # real model (free Gemini tier is rate limited: use fewer repeats if you hit it): pass rate and consistency
+python main.py                  # the scheduler in the terminal, no UI
+python -m pytest                # 148 tests, no network or key needed
+python -m evals.run_eval        # offline reliability run (scripted model)
+python -m evals.run_eval --live --repeats 3   # real model, needs a key
 ```
 
-The eval scores each run on: plan committed, no conflicts, fits available time, every pet covered, every dog/cat has a feeding task. It also reports average attempts and whether the task count was the same across repeats. The offline mode checks the harness and the revision loop; only `--live` measures the real model.
+## Sample interactions
 
-## Implementation Summary
-
-The logic lives in `pawpal_system.py` and can be tried from the terminal with `python main.py`.
-
-- **`Task`**: one care activity (title, duration, priority, frequency, optional preferred time, completion status).
-- **`Pet`**: a pet and its list of tasks. It adds, edits, and removes its own tasks.
-- **`Owner`**: has the available minutes for the day and a list of pets. `get_all_tasks()` returns every pet's tasks together.
-- **`Scheduler`**: the "brain". `generate_plan()` reads tasks from `Owner.get_all_tasks()` (so all pets are covered), skips completed tasks, orders the rest by priority then duration, and places each one at its preferred time if free or in the earliest free slot until the owner's time runs out.
-- **`DailyPlan`**: the result. It holds the scheduled items (with start times and reasons) and the skipped items (with reasons), and `display()` prints it.
-
-How they work together: `Owner` → `Pet` → `Task` hold the data, `Scheduler` reads from the `Owner` and creates a `DailyPlan`. See [diagrams/uml.mmd](diagrams/uml.mmd) for the full class diagram.
-
-## 🖥️ Sample Output
-
-This is the generated plan from `python main.py` for an owner with two pets (Buddy the dog and Mia the cat) and 120 minutes available. The full demo output, including sorting, conflict warnings, and filtering, is in the Demo Walkthrough below.
-
-```
-Today's Schedule
-----------------
-7:00 AM - 7:30 AM  Morning walk (Buddy) [done]
-8:00 AM - 8:05 AM  Give medication (Mia)
-8:05 AM - 8:15 AM  Feed breakfast (Mia)
-8:15 AM - 8:25 AM  Flea treatment (Buddy)
-12:00 PM - 12:20 PM  Play with laser (Mia)
-6:00 PM - 6:15 PM  Brush coat (Buddy)
-Total: 90 minutes
-
-Why this plan:
-- Morning walk: done, placed at its preferred time 7:00 AM
-- Give medication: high priority, placed at its preferred time 8:00 AM
-- Feed breakfast: high priority, preferred time was taken or unavailable, placed in the next free slot
-- Flea treatment: medium priority, preferred time was taken or unavailable, placed in the next free slot
-- Play with laser: medium priority, placed at its preferred time 12:00 PM
-- Brush coat: low priority, placed at its preferred time 6:00 PM
-```
-
-## 🧪 Testing PawPal+
-
-Run the tests with:
+Reproduce the first three with one command (no API key needed; the full captured output is saved in [evals/sample_output.txt](evals/sample_output.txt)):
 
 ```bash
-python -m pytest
+python -m evals.demo            # three goals, each with the agent's trace and the final schedule
+python -m evals.demo --live     # same goals against the real model
 ```
 
-The 26 tests in `tests/test_pawpal.py` cover:
+The first three are real traces produced by the agent code. The model replies come from the offline eval's *scripted* model (`evals/run_eval.py`), which replays fixed answers so the checking and revision logic can be shown deterministically. A live Gemini run produces the same kind of trace with the model's own wording.
 
-- **Basics:** marking a task complete, adding a task to a pet, and editing a task (unknown fields and `id` are rejected).
-- **Sorting:** tasks come back in time order with untimed tasks last, equal times keep their order, and an empty list or the original list is left unchanged.
-- **Filtering:** by pet, by completion status, and by both, plus an unknown pet returning nothing.
-- **Recurring tasks:** a daily task creates a copy due tomorrow, a weekly task one due in 7 days, a one-time task creates nothing, a late completion is still due tomorrow, and completing the same task twice doesn't duplicate it.
-- **Conflict detection:** same-time and overlapping tasks (same pet and different pets) are flagged, back-to-back, completed, and untimed tasks are not, and three tasks at one time give three warnings.
-- **Scheduling:** priority order, skipping tasks that don't fit, ignoring tasks not due yet, moving a clashing task to the next free slot, and empty cases (no pets, a pet with no tasks).
-- **Finished tasks:** a task finished today stays on the plan in its slot marked done (and its minutes still count), so completing a task never makes it vanish or shifts the rest of the day; a task finished on an earlier day is not shown.
-- **No endless copies:** a task that isn't due yet can't be marked done, so a daily task can't be completed over and over to create more copies; finishing a task can be undone, which also removes the copy it created.
-
-Output of a successful run:
+**1. The agent catches an overlap and fixes it**
+Input: *"I just adopted a puppy, set up a daily care routine."* (pet: Biscuit, a dog; 120 minutes)
 
 ```
-============================= test session starts =============================
-platform win32 -- Python 3.13.15, pytest-9.1.1, pluggy-1.7.0
-rootdir: C:\Users\Brand\Desktop\Codepath A110\ai110-module2show-pawpal-starter
-configfile: pytest.ini
-plugins: anyio-4.15.1
-collected 26 items
+[plan]   Attempt 1: model proposed 3 task(s)
+[check]  Conflict: Morning feeding (Biscuit, 8:00 AM-8:10 AM) overlaps Walk (Biscuit, 8:00 AM-8:30 AM)
+[revise] Sending the problems back to the model to fix.
+[plan]   Attempt 2: model proposed 3 task(s)
+[check]  All checks passed: no new conflicts, everything fits.
+[commit] Added 3 task(s) to your pets; all checks passed.
 
-tests\test_pawpal.py ..........................                          [100%]
-
-============================= 26 passed in 0.08s ==============================
+8:00 AM - 8:10 AM  Morning feeding (Biscuit)
+8:30 AM - 9:00 AM  Walk (Biscuit)
+6:00 PM - 6:10 PM  Evening feeding (Biscuit)
 ```
 
-**Confidence Level: ★★★★☆ (4 out of 5)**
-
-All 26 tests pass, and they cover the main behaviors and the edge cases I could think of, including one real bug found and fixed (completing a recurring task twice). I'm not giving 5 stars because month and year rollover for recurring dates isn't tested, the Streamlit UI has no automated tests, tasks that cross midnight display without a "next day" marker, and the greedy scheduler can pick a worse plan than the best possible one.
-
-## 📐 Smarter Scheduling
-
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | `Scheduler.sort_by_time()` | Orders tasks by preferred time; tasks with no time go last. |
-| Filtering | `Owner.filter_tasks()` | Filters by pet name and/or completion status. |
-| Conflict handling | `Scheduler.detect_conflicts()` | Warns when two tasks' preferred times overlap. |
-| Recurring tasks | `Task.mark_complete()`, `Pet.complete_task()` | Completing a daily or weekly task creates the next one. |
-
-### Sorting
-
-`Scheduler.sort_by_time(tasks)` returns a new list ordered by `preferred_time` (stored as minutes since midnight), earliest first. Tasks without a preferred time go at the end, and the original list is not changed. Separately, `Scheduler.generate_plan()` orders tasks by priority (high first), then shorter duration, then pet order, and the finished `DailyPlan` is always listed by start time.
-
-### Filtering
-
-`Owner.filter_tasks(pet_name=None, completed=None)` returns the tasks that match. Leave a filter as `None` to ignore it, or give both to require both. For example, `owner.filter_tasks(pet_name="Mia", completed=False)` returns Mia's unfinished tasks.
-
-### Conflict detection
-
-`Scheduler.detect_conflicts()` looks at every pair of pending tasks (due today or earlier, and not completed) that have a preferred time, across all pets. Two tasks conflict when each starts before the other ends, so identical times and partial overlaps are both caught, while back-to-back tasks are fine. It returns a list of warning messages (empty if there are none) and never raises an error or changes any task. When `generate_plan()` later builds the schedule, it resolves a clash by keeping the higher-priority task at its time and moving the other to the earliest free slot.
-
-### Recurring tasks
-
-Each `Task` has a `frequency` (`ONCE`, `DAILY`, or `WEEKLY`) and a `due_date`. `Task.mark_complete()` marks the task done and, for a repeating task, returns a copy that is not completed and is due 1 day (daily) or 7 days (weekly) after the later of today and the task's own due date, so a finished task can never create a copy due the same day. `Pet.complete_task(task)` calls it and adds the new task to the pet; it refuses a task that isn't due yet. `Pet.reopen_task(task)` undoes a completion and removes the copy it created. `generate_plan()` includes unfinished tasks due on or before the plan date, plus tasks finished that day (kept in their slot and shown as done), so tomorrow's copy stays out of today's schedule.
-
-## 📸 Demo Walkthrough
-
-Start the app with `streamlit run app.py`. You can also try the logic without the UI by running `python main.py`.
-
-### What you can do in the app
-
-The app has three pages, chosen from the navigation bar at the top: **Schedule** (the home page), **Plan with AI**, and **Day & pets**. The code is split to match: `app.py` is the entry point (header and navigation), `app_pages/` has one file per page, and `ui.py` holds the shared helpers. Times are entered in 12-hour time boxes: click a part (hour, minutes, AM/PM) and type or use the arrow keys, in 15-minute steps. An optional time box can be emptied.
-
-- **Your day (Day & pets):** set how many minutes you can spend, when your day starts (and optionally ends), and busy times like work.
-- **Your pets (Day & pets):** add a pet with a name and species. Each pet is a card with its task counts and a delete button (with a confirmation).
-- **Plan with AI (its own page):** describe a goal and the AI adds tasks, checked against your schedule.
-- **Today's schedule (Schedule):** a calendar and a list, rebuilt automatically. Every block names its pet. Tasks you finish stay in place with a check mark, a struck-through title and "Done".
-- **Your tasks (Schedule):** tasks grouped by pet, in time order, with coloured priority badges, filtered by status (all, to do, done).
-- **Conflict warnings:** if two tasks' preferred times overlap, a warning names both tasks and tells you how to fix it.
-- **Manage tasks:** add a task (a blank title is refused). In the list view, tick a task's checkbox to mark it done (it is crossed out here and on the calendar, and finishing a repeating one creates tomorrow's copy); untick it to undo. Each row also has an Edit button that opens a dialog to change or delete the task. Tasks that are not on today's list (due later, or left out) can be edited from the sections under the schedule.
-
-### Example workflow
-
-1. Set the owner to "Jordan" with 120 minutes available.
-2. Add two pets: Buddy (dog) and Mia (cat).
-3. Add a "Walk" for Buddy (30 min, high priority, daily, 9:00 AM) and "Meds" for Mia (10 min, high priority, once, 9:00 AM).
-4. Look at the task table, which is sorted by time. A conflict warning appears because both tasks want 9:00 AM.
-5. Look at today's schedule (it updates by itself). Meds (shorter, so it goes first) keeps 9:00 AM, and Walk moves to the earliest free slot at 8:00 AM. Hover a block on the calendar to see why it was placed there.
-6. Tick the checkbox next to "Walk" in the list view. It is crossed out and stays on today's schedule, and because it is daily the app creates tomorrow's Walk. Ticked it by mistake? Untick it and the copy is taken back.
-
-### Scheduler behaviors shown
-
-- **Sorting:** tasks added out of order are listed by time of day.
-- **Conflict warnings:** overlapping tasks are flagged for the same pet and across pets, without crashing.
-- **Priority and time budget:** higher-priority tasks are scheduled first, and tasks that don't fit are skipped with a reason.
-- **Preferred time fallback:** a task that loses its slot is moved to the next free one.
-- **Recurrence:** completing a daily task adds a copy due tomorrow, which stays out of today's plan and can't itself be completed until it is due.
-- **Filtering:** tasks can be narrowed to one pet or to done or unfinished tasks.
-
-### Sample CLI output
-
-Output from `python main.py`. It adds tasks out of order, shows sorting and a conflict check, completes a daily task, filters tasks, and prints the final schedule:
+**2. The agent notices it planned more than the day allows**
+Input: *"Care routine for my cat and dog, I only have 45 minutes a day."* (pets: Mia, Rex)
 
 ```
-Owner: Jordan (120 minutes available)
-Pets: Buddy, Mia
+[plan]   Attempt 1: model proposed 3 task(s)
+[check]  All tasks together take 110 min but the owner only has 45 min (over by 65). Shorten tasks or
+         drop the lowest-priority ones. As it stands these would be left out: 'Long hike' (Rex).
+[revise] Sending the problems back to the model to fix.
+[plan]   Attempt 2: model proposed 3 task(s)
+[commit] Added 3 task(s) to your pets; all checks passed.
 
-Tasks sorted by time:
-    7:00 AM  Morning walk (Buddy) [to do, due 2026-11-16]
-    7:00 AM  Flea treatment (Buddy) [to do, due 2026-11-16]
-    7:15 AM  Feed breakfast (Mia) [to do, due 2026-11-16]
-    8:00 AM  Give medication (Mia) [to do, due 2026-11-16]
-   12:00 PM  Play with laser (Mia) [to do, due 2026-11-16]
-    6:00 PM  Brush coat (Buddy) [to do, due 2026-11-16]
+8:00 AM - 8:10 AM  Feeding (Mia)
+8:30 AM - 8:40 AM  Feeding (Rex)
+5:00 PM - 5:20 PM  Short walk (Rex)         <- replaced the 90-minute "Long hike"
+```
 
-Conflict check:
-  Conflict: Morning walk (Buddy, 7:00 AM-7:30 AM) overlaps Flea treatment (Buddy, 7:00 AM-7:10 AM)
-  Conflict: Morning walk (Buddy, 7:00 AM-7:30 AM) overlaps Feed breakfast (Mia, 7:15 AM-7:25 AM)
+**3. A guardrail rejects an invented pet**
+Input: *"Set up feeding for my dog Max."*
 
-Completed 'Morning walk'; next one is due 2026-11-17.
+```
+[plan]     Attempt 1: model proposed 1 task(s)
+[validate] Rejected task 1 ('Feeding'): unknown pet 'Maxwell' (pets are: Max)
+[revise]   Sending the problems back to the model to fix.
+[plan]     Attempt 2: model proposed 1 task(s)
+[commit]   Added 1 task(s) to your pets; all checks passed.
 
-Mia's tasks:
-   12:00 PM  Play with laser (Mia) [to do, due 2026-11-16]
-    8:00 AM  Give medication (Mia) [to do, due 2026-11-16]
-    7:15 AM  Feed breakfast (Mia) [to do, due 2026-11-16]
+8:00 AM - 8:10 AM  Feeding (Max)
+```
 
-Completed tasks:
-    7:00 AM  Morning walk (Buddy) [done, due 2026-11-16]
+**4. No AI: the scheduler explains itself** (`python main.py`)
+In the demo data, Buddy's morning walk overlaps Mia's breakfast. The app warns about the overlap, then the plan keeps higher-priority tasks at their preferred time and moves a clashing task to the next free slot, with a reason for each:
 
-Today's Schedule
-----------------
-7:00 AM - 7:30 AM  Morning walk (Buddy) [done]
-8:00 AM - 8:05 AM  Give medication (Mia)
-8:05 AM - 8:15 AM  Feed breakfast (Mia)
-8:15 AM - 8:25 AM  Flea treatment (Buddy)
-12:00 PM - 12:20 PM  Play with laser (Mia)
-6:00 PM - 6:15 PM  Brush coat (Buddy)
-Total: 90 minutes
-
-Why this plan:
-- Morning walk: done, placed at its preferred time 7:00 AM
+```
+Conflict: Morning walk (Buddy, 7:00 AM-7:30 AM) overlaps Feed breakfast (Mia, 7:15 AM-7:25 AM)
+...
 - Give medication: high priority, placed at its preferred time 8:00 AM
 - Feed breakfast: high priority, preferred time was taken or unavailable, placed in the next free slot
-- Flea treatment: medium priority, preferred time was taken or unavailable, placed in the next free slot
-- Play with laser: medium priority, placed at its preferred time 12:00 PM
-- Brush coat: low priority, placed at its preferred time 6:00 PM
 ```
 
-In this run the morning walk was completed before the schedule was built, so it stays on the plan in its 7:00 AM slot marked `[done]` (its minutes still count), and tomorrow's copy is not part of today's plan.
+In the app, a task that could not go at the time it asked for is marked in the list, for example `8:25 AM – 8:45 AM · Playtime (Nala) · 🟢 Low priority · ⏱ wanted 5:25 PM`.
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+## Design decisions and trade-offs
+
+- **The model proposes, ordinary code decides.** The checker is `Scheduler`, not a second model call. It is deterministic, free, fast and unit-tested, and the AI's mistakes show up as concrete messages (overlaps, minutes over budget) that the model can act on. *Trade-off:* the checker only knows about time. It cannot tell that a "feeding" task is a bad idea for a rabbit, so content quality is still the model's job and the human's review.
+- **Dry run on a copy, commit at the end.** A failed or confused run leaves the owner's data untouched. If revisions run out, the best attempt is committed with its leftover issues shown to the user instead of hidden. *Trade-off:* the user may get a plan that is not fully clean, but they see exactly what is wrong.
+- **Guardrails before the scheduler.** Unknown pets, bad durations, priorities and times are rejected up front and reported back to the model, so garbage never reaches the scheduler.
+- **A greedy scheduler.** Tasks are placed by priority, then shorter first. It is easy to explain ("this was high priority, so it went first"), but it can choose a worse overall plan than the best possible one (a knapsack problem). For the handful of tasks one owner has, explainability wins.
+- **Preferred times are soft, the time budget is hard.** A clash moves a task to the next free slot rather than dropping it, so a conflict can change *when* an important task happens but never *whether* it happens. Only task minutes count against the budget, not the 5-minute spacing between tasks.
+- **A ticked task never moves.** Finished tasks stay on the plan, crossed out, in the slot they held when ticked. Without this, ticking a task made it jump to a different time and shuffled the others (a real bug found during use).
+- **A small `LLMClient` interface** lets Gemini, Claude and a scripted fake model be swapped, which is what makes the agent testable offline.
+- **Multi-page Streamlit app with a top navigation bar**, a dialog for editing, 12-hour time boxes in 15-minute steps, and segmented controls. *Trade-off:* Streamlit reruns the whole script on every interaction, so state is held in `st.session_state`, and data is lost on a browser refresh (no persistence yet).
+
+## Testing summary
+
+**148 automated tests, all passing** (`python -m pytest`, no network or API key needed):
+
+| Area | Tests | What is covered |
+|------|-------|-----------------|
+| `tests/test_pawpal.py` | 50 | scheduling, priority, busy times, sorting, filtering, recurrence, conflicts, finished tasks |
+| `tests/test_agent.py` | 29 | guardrails, revision loop, dry run and commit, duplicates, error handling, with a scripted fake model |
+| `tests/test_app.py` | 55 | the Streamlit pages end to end (Streamlit's `AppTest`): adding, ticking, editing, time boxes, navigation |
+| `tests/test_calendar_view.py` | 14 | the calendar drawing |
+
+**Reliability eval** (`python -m evals.run_eval`): four scenarios, three runs each, every run scored on five checks (plan committed, no conflicts, fits the time budget, every pet covered, every dog/cat has a feeding task). The offline run scores **12/12**. That checks the harness and the revision loop, but it uses a scripted model, so it says nothing yet about how reliable the real model is. `--live` measures that. I have not recorded a live pass rate in this repo, so I make no claim about it.
+
+**Reliability evidence** (text-based; reproduce with the commands above). Methods used: automated tests, an eval harness, and logging with error handling. Not used: confidence scoring (the model is not asked to rate its own certainty) and human evaluation (no peer review of live outputs has been done yet).
+
+Offline eval, `python -m evals.run_eval` (scripted model, 3 runs per scenario, each run scored on the five checks above):
+
+| Scenario | Evaluation criteria | Runs passed | Avg attempts | Same task count each run |
+|----------|--------------------|-------------|--------------|--------------------------|
+| new puppy | overlap is caught and revised away | 3/3 | 2.0 | yes |
+| two pets, tight day | over-budget plan is caught and shortened | 3/3 | 2.0 | yes |
+| weekly grooming | non-JSON reply is recovered from | 3/3 | 2.0 | yes |
+| unknown pet guardrail | invented pet name is rejected | 3/3 | 2.0 | yes |
+| **Overall** | all five checks | **12/12 (100%)** | | |
+
+Failure handling, each covered by a named test in `tests/test_agent.py`:
+
+| Input or condition | Expected behavior | Test | Result |
+|--------------------|-------------------|------|--------|
+| Empty goal, or no pets | Friendly error, data unchanged | `test_empty_goal_and_no_pets_rejected` | Pass |
+| Model replies with prose, not JSON | Asked again, then recovers | `test_garbage_then_valid_reply_recovers` | Pass |
+| Model never returns a valid plan | Error shown, owner unchanged | `test_never_valid_leaves_owner_unchanged` | Pass |
+| API call crashes | Becomes a friendly `AgentError` | `test_llm_crash_becomes_agent_error` | Pass |
+| Unknown pet, bad duration, priority or frequency | Item rejected with a reason | `test_validate_rejects_bad_items` | Pass |
+| Two proposed tasks overlap | Problem sent back, plan revised | `test_conflict_is_sent_back_and_revised` | Pass |
+| Plan needs more minutes than the day has | Reported once with the numbers, revised | `test_total_over_budget_is_reported_once_with_the_numbers` | Pass |
+| Problems remain after the last revision | Shown to the user, not hidden | `test_unresolved_problems_are_reported_not_hidden` | Pass |
+| Model repeats a task the pet already has | Skipped as a duplicate | `test_same_title_and_time_is_skipped_as_duplicate` | Pass |
+| Gemini busy or rate limited | Retried automatically | `test_gemini_retries_then_succeeds` | Pass |
+
+Summary: 148 of 148 automated tests pass, and the offline eval passes 12 of 12 runs. The agent needed a second attempt on every offline scenario, which is by design (each scenario starts with a flawed reply), so the checker did its job each time. Every agent run is recorded in `pawpal.log` (goal, attempts, rejected items, problems, outcome). Because the offline model is scripted, these numbers prove the checking and revision logic works; they do not measure the real model, which `--live` does.
+
+**What worked**
+- Testing the agent with a scripted model made the loop easy to test, including the failure paths (bad JSON, unknown pet, API error).
+- Driving the real Streamlit pages with `AppTest` caught UI bugs that logic tests could not.
+
+**What did not, and what I fixed**
+- Completing a repeating task twice created duplicate copies; a task that was not yet due could be completed forever to spawn more. Both are now blocked, and un-ticking removes the copy it made.
+- A cleared optional time box silently reverted to its default (Streamlit returns the `value=` default when a box is emptied), so a task's time could not be removed. Found by a failing test and fixed by seeding the value through session state.
+- A ticked task jumped to its preferred time and displaced others. Fixed by recording the slot it held when ticked.
+- Plans could look fine but not fit the buffer between tasks, while the conflict warning only checks overlaps. I now mark tasks that did not get the time they wanted rather than changing the warning.
+
+**What I learned:** most "AI bugs" were really plain-code bugs at the edges (state, ordering, defaults), and the verifier is the part worth the most tests.
+
+**Not tested:** month and year rollover of recurring dates, tasks that cross midnight, and screen-reader behavior (the UI was reviewed against WCAG 2.1 AA but not tested with a real screen reader).
+
+## Portfolio: what this project says about me as an AI engineer
+
+I treat a language model as an unreliable component, not an oracle. In PawPal+ I built the structure that makes it usable: a strict output format, guardrails, a dry run on a copy of the data, a verifier made of ordinary tested code, a bounded revision loop, logging, and an eval harness. I also write down what my evidence does and does not show: the offline eval passes 12/12, but it uses a scripted model, so it validates the loop and not the real model. I am comfortable with the full path from a design diagram to a tested, deployed-quality app, and I care more about being able to show that a system works than about a demo that merely looks good.
+
+## Features at a glance
+
+- Multiple pets in one schedule; priority-based greedy plan with a reason for every scheduled or skipped task
+- Preferred times with fallback; busy times (e.g. work) and a day start and end; a time budget in minutes
+- Conflict warnings; sorting by time; filtering by pet and status; daily and weekly recurrence with undo
+- Calendar view (one colour per pet) and a list view with checkboxes; edit and delete from a dialog; night mode
+- AI planner with guardrails, dry run, scheduler checks, up to 3 revisions, a visible trace and `pawpal.log` logging
+
+## Reflection
+
+Building PawPal+ taught me that adding AI to an app is mostly an engineering problem around the model, not inside it. The model's output is useful but cannot be trusted as it arrives, so the work was in the structure around it: validate it, try it on a copy, check it with deterministic code, feed back concrete errors, and leave the final call to a person. It also taught me to measure the model instead of trusting it, which is why the project has an eval harness and why this README says plainly what the offline eval does and does not show.
+
+The graded responsible-AI reflection (how I worked with AI, a suggestion I accepted and one I rejected or revised, and the system's limitations) belongs in `model_card.md`. There is a short design reflection in [reflection.md](reflection.md).

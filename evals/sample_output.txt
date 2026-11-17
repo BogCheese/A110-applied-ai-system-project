@@ -1,0 +1,64 @@
+$ python -m evals.demo
+=== Example 1: new puppy ===
+Input : I just adopted a puppy, set up a daily care routine.
+Pets  : Biscuit (dog); 120 minutes available
+Agent trace:
+  [plan] Attempt 1: model proposed 3 task(s)
+  [check] Conflict: Morning feeding (Biscuit, 8:00 AM-8:10 AM) overlaps Walk (Biscuit, 8:00 AM-8:30 AM)
+  [revise] Sending the problems back to the model to fix.
+  [plan] Attempt 2: model proposed 3 task(s)
+  [check] All checks passed: no new conflicts, everything fits.
+  [commit] Added 3 task(s) to your pets; all checks passed.
+Result: committed=True, attempts=2, issues left=0
+Schedule:
+  8:00 AM - 8:10 AM  Morning feeding (Biscuit)
+  8:30 AM - 9:00 AM  Walk (Biscuit)
+  6:00 PM - 6:10 PM  Evening feeding (Biscuit)
+
+=== Example 2: two pets, tight day ===
+Input : Care routine for my cat and dog, I only have 45 minutes a day.
+Pets  : Mia (cat), Rex (dog); 45 minutes available
+Agent trace:
+  [plan] Attempt 1: model proposed 3 task(s)
+  [check] All tasks together take 110 min but the owner only has 45 min (over by 65). Shorten tasks or drop the lowest-priority ones. As it stands these would be left out: 'Long hike' (Rex).
+  [revise] Sending the problems back to the model to fix.
+  [plan] Attempt 2: model proposed 3 task(s)
+  [check] All checks passed: no new conflicts, everything fits.
+  [commit] Added 3 task(s) to your pets; all checks passed.
+Result: committed=True, attempts=2, issues left=0
+Schedule:
+  8:00 AM - 8:10 AM  Feeding (Mia)
+  8:30 AM - 8:40 AM  Feeding (Rex)
+  5:00 PM - 5:20 PM  Short walk (Rex)
+
+=== Example 3: unknown pet guardrail ===
+Input : Set up feeding for my dog Max.
+Pets  : Max (dog); 60 minutes available
+Agent trace:
+  [plan] Attempt 1: model proposed 1 task(s)
+  [validate] Rejected task 1 ('Feeding'): unknown pet 'Maxwell' (pets are: Max)
+  [check] No valid tasks were produced.
+  [revise] Sending the problems back to the model to fix.
+  [plan] Attempt 2: model proposed 1 task(s)
+  [check] All checks passed: no new conflicts, everything fits.
+  [commit] Added 1 task(s) to your pets; all checks passed.
+Result: committed=True, attempts=2, issues left=0
+Schedule:
+  8:00 AM - 8:10 AM  Feeding (Max)
+
+
+$ python -m evals.run_eval
+Mode: OFFLINE scripted model, 3 run(s) per scenario
+
+new puppy                pass 3/3  avg attempts 2.0  same task count each run: yes
+two pets, tight day      pass 3/3  avg attempts 2.0  same task count each run: yes
+weekly grooming          pass 3/3  avg attempts 2.0  same task count each run: yes
+unknown pet guardrail    pass 3/3  avg attempts 2.0  same task count each run: yes
+
+Overall: 12/12 runs passed all checks (100%)
+
+$ python -m pytest -q
+........................................................................ [ 48%]
+........................................................................ [ 97%]
+....                                                                     [100%]
+148 passed in 21.42s
