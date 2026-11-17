@@ -13,7 +13,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import pawpal_agent
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 from pawpal_system import Frequency, Pet, Priority, Task
 
@@ -58,23 +58,52 @@ def untick(at, task):
     return at.run()
 
 
+def open_edit(at, task):
+    """Press a task's Edit button so its edit window is open (does nothing if it already is)."""
+    if at.session_state["editing_task"] if "editing_task" in at.session_state else None:
+        return at
+    at.button(key=f"edit_open_{task.id}").click()
+    return at.run()
+
+
 def click_for(at, task, action):
-    """Press 'save' or 'delete' in a task's Edit popover."""
+    """Press 'save' or 'delete' in a task's edit window."""
+    open_edit(at, task)
     at.button(key=f"edit_{action}_{task.id}").click()
     return at.run()
 
 
 def edit_field(at, kind, task):
-    """One of a task's Edit fields: kind is title, minutes, priority, often or time."""
-    widget = {"title": at.text_input, "minutes": at.number_input}.get(kind, at.selectbox)
+    """One of a task's edit fields: kind is title, minutes, priority, often or time."""
+    open_edit(at, task)
+    widget = {
+        "title": at.text_input,
+        "minutes": at.number_input,
+        "priority": at.segmented_control,
+        "often": at.segmented_control,
+        "time": at.time_input,
+    }[kind]
     return widget(key=f"edit_{kind}_{task.id}")
 
 
+def at_time(text):
+    """'8:30 AM' -> datetime.time(8, 30), the way a user reads it."""
+    hour_text, rest = text.split(":")
+    minute_text, suffix = rest.split()
+    hour = int(hour_text) % 12 + (12 if suffix == "PM" else 0)
+    return time(hour, int(minute_text))
+
+
 def pick(at, label, text):
-    """Choose a dropdown option by the text the user sees (e.g. '8:30 AM')."""
-    box = [b for b in at.selectbox if b.label == label][0]
-    box.select_index(box.options.index(text))
+    """Set a time box by the text the user sees (e.g. '8:30 AM'), or empty it with None."""
+    box = [t for t in at.time_input if t.label == label][0]
+    box.set_value(None if text is None else at_time(text))
     return at.run()
+
+
+def go(at, page):
+    """Open one of the pages: schedule (the default), plan_ai, or day_pets."""
+    return at.switch_page(f"app_pages/{page}.py").run()
 
 
 def page_text(at):
@@ -91,14 +120,18 @@ def test_page_loads_without_errors():
 
 def test_first_run_asks_for_a_pet_and_hides_the_rest():
     at = AppTest.from_file(APP_PATH, default_timeout=30).run()
+    assert "Your schedule will appear here" in page_text(at)  # the home page invites you to add a pet
+    assert "Plan with AI" not in [b.label for b in at.button]
+    go(at, "day_pets")
     assert any("Add your first pet" in i.value for i in at.info)
-    labels = [b.label for b in at.button]
-    assert "Plan with AI" not in labels and "Generate schedule" not in labels
+    go(at, "plan_ai")
+    assert "Plan with AI" not in [b.label for b in at.button]  # the planner waits for a pet
 
 
 def test_species_choices_are_capitalized():
     at = AppTest.from_file(APP_PATH, default_timeout=30).run()
-    species = [s for s in at.selectbox if s.label == "Species"][0]
+    go(at, "day_pets")
+    species = [s for s in at.segmented_control if s.label == "Species"][0]
     assert list(species.options) == ["Dog", "Cat", "Other"]
 
 
@@ -106,6 +139,7 @@ def test_task_title_default_depends_on_species(app):
     owner = app.session_state.owner
     owner.add_pet(Pet("Rex", "dog"))
     owner.add_pet(Pet("Blob", "other"))
+    app.run()
     titles = {}
     for index, pet in enumerate(owner.pets):
         [s for s in app.selectbox if s.label == "Add task for"][0].select(index)
@@ -118,16 +152,18 @@ def test_every_input_has_a_unique_label(app):
     """Duplicate labels make controls ambiguous for screen reader users."""
     app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
     app.run()
-    # The Edit popovers repeat once per task by design; their widgets have keys starting "edit_".
-    widgets = [w for w in (*app.selectbox, *app.text_input, *app.number_input, *app.text_area, *app.radio)
-               if not (w.key or "").startswith("edit_")]
-    labels = [w.label for w in widgets]
-    assert len(labels) == len(set(labels)), sorted(l for l in labels if labels.count(l) > 1)
+    for page in ("schedule", "plan_ai", "day_pets"):
+        go(app, page)
+        widgets = [*app.selectbox, *app.text_input, *app.number_input, *app.text_area, *app.radio,
+                   *app.time_input, *app.segmented_control]
+        labels = [w.label for w in widgets]
+        assert len(labels) == len(set(labels)), (page, sorted(l for l in labels if labels.count(l) > 1))
 
 
 # ---- AI planner ----
 
 def test_running_the_planner_twice_does_not_duplicate_tasks(app):
+    go(app, "plan_ai")
     app.text_area[0].set_value("plan").run()
     click(app, "Plan with AI")
     click(app, "Plan with AI")
@@ -140,6 +176,7 @@ def test_planner_error_is_shown_not_raised(app, monkeypatch):
         raise pawpal_agent.AgentError("No AI key found.")
 
     monkeypatch.setattr(pawpal_agent, "make_client", broken)
+    go(app, "plan_ai")
     app.text_area[0].set_value("plan").run()
     click(app, "Plan with AI")
     assert not app.exception
@@ -148,13 +185,16 @@ def test_planner_error_is_shown_not_raised(app, monkeypatch):
 
 
 def test_example_prompt_button_fills_the_planner_box(app):
+    go(app, "plan_ai")
     click(app, "New pet routine")
     assert "Nala" in app.text_area[0].value
 
 
 def test_planner_shows_the_user_what_the_ai_is_told(app):
+    go(app, "day_pets")
     pick(app, "Day ends at (optional)", "9:00 PM")
     click(app, "Add busy time")  # 9:00 AM - 5:00 PM
+    go(app, "plan_ai")
     shown = page_text(app)
     assert "ends at 9:00 PM" in shown and "9:00 AM-5:00 PM" in shown and "Nala (cat)" in shown
     assert "Leave at least 5 minute(s) between tasks" in shown  # the default buffer
@@ -167,6 +207,7 @@ def test_owner_starts_with_a_five_minute_buffer(app):
 # ---- sidebar: day settings and busy times ----
 
 def test_busy_time_can_be_added_and_removed(app):
+    go(app, "day_pets")
     click(app, "Add busy time")  # form defaults to 9:00 AM - 5:00 PM
     assert app.session_state.owner.busy_blocks == [(9 * 60, 17 * 60)]
     click(app, "Delete busy time 9:00 AM - 5:00 PM")
@@ -174,33 +215,35 @@ def test_busy_time_can_be_added_and_removed(app):
 
 
 def test_day_start_and_end_update_the_owner(app):
+    go(app, "day_pets")
     pick(app, "Day starts at", "9:30 AM")
     pick(app, "Day ends at (optional)", "8:00 PM")
     owner = app.session_state.owner
     assert (owner.day_start_minute, owner.day_end_minute) == (9 * 60 + 30, 20 * 60)
-    pick(app, "Day ends at (optional)", "No end time")
+    pick(app, "Day ends at (optional)", None)  # emptying the box means no end time
     assert app.session_state.owner.day_end_minute is None
 
 
 def test_end_before_start_is_rejected_with_a_warning(app):
+    go(app, "day_pets")
     pick(app, "Day ends at (optional)", "7:00 AM")  # the day starts at 8:00 AM by default
     assert app.session_state.owner.day_end_minute is None
     assert any("must end after it starts" in w.value for w in app.warning)
 
 
-def test_all_times_are_shown_in_standard_time(app):
-    options = [box for box in app.selectbox if box.label == "Day starts at"][0].options
-    assert "8:00 AM" in options and "1:05 PM" in options and "12:00 AM" in options
-    assert not any(option.startswith(("13:", "20:")) for option in options)
-    assert not app.time_input  # no 24-hour time boxes left on the page
+def test_all_times_are_shown_in_standard_time_in_quarter_hour_steps(app):
+    go(app, "day_pets")
+    boxes = list(app.time_input)
+    assert boxes and all(box.proto.format == "12h" for box in boxes)  # 8:00 AM, never 08:00
+    assert all(box.proto.step == 15 * 60 for box in boxes)  # a short list, not every five minutes
+    assert not [s for s in app.selectbox if "time" in s.label.lower() or "day " in s.label.lower()]
 
 
 # ---- tasks ----
 
 def test_adding_a_task_uses_the_form_and_shows_a_confirmation(app):
     # Inside a form, a choice only counts when the form is submitted, so do both in one step.
-    box = [b for b in app.selectbox if b.label == "New task preferred time"][0]
-    box.select_index(box.options.index("6:15 PM"))
+    app.time_input(key="task_time").set_value(time(18, 15))
     click(app, "Add task")
     assert app.session_state.owner.pets[0].tasks[0].preferred_time == 18 * 60 + 15
     assert any("Added" in t.value for t in app.toast)
@@ -242,6 +285,7 @@ def test_ticking_the_checkbox_creates_the_next_occurrence(app):
 # ---- schedule ----
 
 def test_no_sidebar_and_owner_name_is_editable(app):
+    go(app, "day_pets")
     assert len(app.sidebar) == 0  # everything lives on the main page
     name_box = [t for t in app.text_input if t.label == "Pet Owner"][0]
     assert name_box.value == "" and name_box.placeholder == "Name"  # greyed hint, not a typed name
@@ -256,13 +300,16 @@ def calendar_html(at):
 # ---- AI planner (trace stays visible) ----
 
 def test_planner_adds_tasks_and_keeps_trace_after_other_clicks(app):
+    go(app, "plan_ai")
     app.text_area[0].set_value("plan Nala's day").run()
     click(app, "Plan with AI")
     assert not app.exception
     assert [t.title for t in app.session_state.owner.pets[0].tasks] == ["Feeding"]
     assert any(e.label == "What the agent did" for e in app.expander)
 
+    go(app, "day_pets")
     pick(app, "Day ends at (optional)", "9:00 PM")  # a later interaction must not erase the trace
+    go(app, "plan_ai")
     assert any(e.label == "What the agent did" for e in app.expander)
 
 
@@ -347,17 +394,18 @@ def test_task_titles_with_markdown_characters_are_shown_literally(app):
 
 def test_pet_can_be_deleted_after_confirming(app):
     app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
-    app.run()
+    go(app, "day_pets")
     click(app, "Delete Nala")
     assert app.session_state.owner.pets  # nothing happens until confirmed
     assert "Delete **Nala** and 1 task(s)?" in page_text(app)
     click(app, "Yes, delete")
     assert app.session_state.owner.pets == []
     assert any("Deleted Nala" in t.value for t in app.toast)
-    assert "Your schedule will appear here" in page_text(app)
+    assert any("Add your first pet" in i.value for i in app.info)
 
 
 def test_cancelling_a_pet_deletion_keeps_the_pet(app):
+    go(app, "day_pets")
     click(app, "Delete Nala")
     click(app, "Cancel")
     assert [p.name for p in app.session_state.owner.pets] == ["Nala"]
@@ -368,7 +416,9 @@ def test_cancelling_a_pet_deletion_keeps_the_pet(app):
 
 def test_start_over_clears_everything_after_confirming(app):
     app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
+    go(app, "plan_ai")
     app.text_area[0].set_value("some goal").run()
+    go(app, "day_pets")
     pick(app, "Day starts at", "9:30 AM")
     click(app, "Start over")
     assert app.session_state.owner.pets  # asks first
@@ -376,6 +426,7 @@ def test_start_over_clears_everything_after_confirming(app):
     click(app, "Yes, start over")
     owner = app.session_state.owner
     assert owner.pets == [] and owner.day_start_minute == 8 * 60
+    go(app, "plan_ai")
     assert not app.text_area  # the planner box is hidden until there is a pet again
     assert "planner_goal" not in app.session_state  # and its text is gone
 
@@ -445,8 +496,7 @@ def add_task_through_the_form(at, title, minutes=None, time_text=None, pet_index
     if minutes is not None:
         [n for n in at.number_input if n.label == "New task minutes"][0].set_value(minutes)
     if time_text is not None:
-        box = [b for b in at.selectbox if b.label == "New task preferred time"][0]
-        box.select_index(box.options.index(time_text))
+        at.time_input(key="task_time").set_value(at_time(time_text))
     return click(at, "Add task")
 
 
@@ -472,8 +522,8 @@ def test_adding_a_task_with_a_blank_title_is_refused(app):
 
 
 def test_task_title_is_trimmed_and_all_form_fields_are_saved(app):
-    [s for s in app.selectbox if s.label == "New task priority"][0].select(Priority.HIGH)
-    [s for s in app.selectbox if s.label == "How often"][0].select(Frequency.WEEKLY)
+    [s for s in app.segmented_control if s.label == "New task priority"][0].set_value(Priority.HIGH)
+    [s for s in app.segmented_control if s.label == "How often"][0].set_value(Frequency.WEEKLY)
     add_task_through_the_form(app, "  Nail trim  ", minutes=12, time_text="7:30 PM")
     task = app.session_state.owner.pets[0].tasks[0]
     assert (task.title, task.duration_minutes, task.priority, task.frequency, task.preferred_time) == (
@@ -518,7 +568,7 @@ def test_a_repeating_task_cannot_be_marked_done_over_and_over(app):
     assert len(pet.tasks) == 2  # still exactly two: nothing more can be completed today
     # The copy can still be edited, from the "not on today's schedule" section.
     assert any(e.label == "Not on today's schedule (1)" for e in app.expander)
-    assert f"edit_save_{copy.id}" in [b.key for b in app.button]
+    assert f"edit_open_{copy.id}" in [b.key for b in app.button]
 
 
 def test_tomorrows_copy_is_listed_as_to_do_but_not_on_todays_schedule(app):
@@ -555,7 +605,7 @@ def test_a_task_finished_on_another_day_has_no_checkbox(app):
     old.completed_on = date.today() - timedelta(days=1)
     app.run()
     assert not [c for c in app.checkbox if c.key == f"done_{old.id}"]  # not on today's list, nothing to untick
-    assert f"edit_save_{old.id}" in [b.key for b in app.button]  # but it can still be edited
+    assert f"edit_open_{old.id}" in [b.key for b in app.button]  # but it can still be edited
 
 
 def test_only_tasks_on_todays_list_get_a_checkbox(app):
@@ -583,10 +633,9 @@ def test_every_edit_field_can_be_changed(app):
     task = pet.tasks[0]
     edit_field(app, "title", task).set_value("Laser play")
     edit_field(app, "minutes", task).set_value(25)
-    edit_field(app, "priority", task).select(Priority.HIGH)
-    edit_field(app, "often", task).select(Frequency.DAILY)
-    time_box = edit_field(app, "time", task)
-    time_box.select_index(time_box.options.index("9:15 AM"))
+    edit_field(app, "priority", task).set_value(Priority.HIGH)
+    edit_field(app, "often", task).set_value(Frequency.DAILY)
+    edit_field(app, "time", task).set_value(time(9, 15))
     click_for(app, task, "save")
     assert (task.title, task.duration_minutes, task.priority, task.frequency, task.preferred_time) == (
         "Laser play", 25, Priority.HIGH, Frequency.DAILY, 9 * 60 + 15)
@@ -600,8 +649,7 @@ def test_editing_can_clear_the_preferred_time_and_a_blank_title_keeps_the_old_on
     app.run()
     task = pet.tasks[0]
     edit_field(app, "title", task).set_value("   ")
-    time_box = edit_field(app, "time", task)
-    time_box.select_index(time_box.options.index("Any time"))
+    edit_field(app, "time", task).set_value(None)  # an empty box means any time
     click_for(app, task, "save")
     assert pet.tasks[0].title == "Play" and pet.tasks[0].preferred_time is None
 
@@ -665,6 +713,7 @@ def test_ai_planner_still_works_with_finished_tasks_present(app):
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.ONCE, preferred_time=8 * 60))
     app.run()
     tick(app, pet.tasks[0])
+    go(app, "plan_ai")
     app.text_area[0].set_value("plan").run()
     click(app, "Plan with AI")
     assert not app.exception

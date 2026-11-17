@@ -36,7 +36,7 @@ Your final app should:
 - **Edit and delete tasks** in the UI, with due dates shown in the task table.
 - **Wide layout.** Your day and your pets sit side by side at the top; the AI planner, today's schedule and your tasks follow below as you scroll. Pets appear as cards you can delete (after a confirmation), and **Start over** clears everything. On a phone everything stacks into one column.
 - **The schedule builds itself.** There is no Generate button: the schedule on the right is rebuilt on every change. It is a timeline that includes busy times and free time.
-- **Night mode.** A toggle in the header switches the page to dark colours. Streamlit can't change its theme from Python, so the toggle uses a small CSS filter (invert plus a hue turn, in `NIGHT_MODE_CSS` in `app.py`). It switches itself off when Streamlit's own dark theme is already active (from its Settings menu or your computer's dark mode), so the page never flips back to light.
+- **Night mode.** A toggle in the header switches the page to dark colours. Streamlit can't change its theme from Python, so the toggle uses a small CSS filter (invert plus a hue turn, in `NIGHT_MODE_CSS` in `ui.py`). It switches itself off when Streamlit's own dark theme is already active (from its Settings menu or your computer's dark mode), so the page never flips back to light.
 - **Themed look.** Colours, fonts and rounded corners come from `.streamlit/config.toml` (a teal accent on a white page, with a matching dark theme), not from CSS in the code.
 - **Calendar view.** The schedule is drawn like a calendar: time runs top to bottom, each pet has its own colour, and every block shows its title, time and priority. Long busy stretches such as work are squeezed into a grey band so the rest stays readable, and the same schedule is available as a plain list. The drawing lives in `calendar_view.py` and is tested without a browser.
 - **Time budget.** "Time I can spend on pet care" counts task minutes only. The 5-minute gap between tasks is kept as spacing but is not charged to that budget. The AI is told how many minutes are already used, and when a plan is over budget it is told the total, by how much, and which tasks would be left out.
@@ -204,13 +204,15 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 
 ### What you can do in the app
 
-- **Your day:** set how many minutes you can spend, when your day starts (and optionally ends), and busy times like work.
-- **Your pets:** add a pet with a name and species. Each pet is a card with its task counts and a delete button (with a confirmation).
-- **Plan with AI:** describe a goal and the AI adds tasks, checked against your schedule.
-- **Today's schedule:** a calendar and a list, rebuilt automatically. Every block names its pet. Tasks you finish stay in place with a check mark, a struck-through title and "Done".
-- **Your tasks:** tasks grouped by pet, in time order, with coloured priority badges, filtered by status (all, to do, done).
+The app has three pages, chosen from the navigation bar at the top: **Schedule** (the home page), **Plan with AI**, and **Day & pets**. The code is split to match: `app.py` is the entry point (header and navigation), `app_pages/` has one file per page, and `ui.py` holds the shared helpers. Times are entered in 12-hour time boxes: click a part (hour, minutes, AM/PM) and type or use the arrow keys, in 15-minute steps. An optional time box can be emptied.
+
+- **Your day (Day & pets):** set how many minutes you can spend, when your day starts (and optionally ends), and busy times like work.
+- **Your pets (Day & pets):** add a pet with a name and species. Each pet is a card with its task counts and a delete button (with a confirmation).
+- **Plan with AI (its own page):** describe a goal and the AI adds tasks, checked against your schedule.
+- **Today's schedule (Schedule):** a calendar and a list, rebuilt automatically. Every block names its pet. Tasks you finish stay in place with a check mark, a struck-through title and "Done".
+- **Your tasks (Schedule):** tasks grouped by pet, in time order, with coloured priority badges, filtered by status (all, to do, done).
 - **Conflict warnings:** if two tasks' preferred times overlap, a warning names both tasks and tells you how to fix it.
-- **Manage tasks:** add a task (a blank title is refused). In the list view, tick a task's checkbox to mark it done (it is crossed out here and on the calendar, and finishing a repeating one creates tomorrow's copy); untick it to undo. Each row also has an Edit button that opens a popover to change or delete the task. Tasks that are not on today's list (due later, or left out) can be edited from the sections under the schedule.
+- **Manage tasks:** add a task (a blank title is refused). In the list view, tick a task's checkbox to mark it done (it is crossed out here and on the calendar, and finishing a repeating one creates tomorrow's copy); untick it to undo. Each row also has an Edit button that opens a dialog to change or delete the task. Tasks that are not on today's list (due later, or left out) can be edited from the sections under the schedule.
 
 ### Example workflow
 
