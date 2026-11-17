@@ -154,7 +154,7 @@ st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 # re-runs, so we only create the Owner the first time and reuse it afterwards.
 if "owner" not in st.session_state:
     st.session_state.owner = Owner(
-        name="Jordan", available_minutes=120, preferences=Preferences(buffer_minutes=BUFFER_MINUTES)
+        name="", available_minutes=120, preferences=Preferences(buffer_minutes=BUFFER_MINUTES)
     )
 
 owner = st.session_state.owner
@@ -188,7 +188,7 @@ with st.expander("How PawPal+ works", expanded=False):
 # ---------------------------------------------------------------------------
 
 st.header("1. Your day")
-owner.name = st.text_input("Owner name", value=owner.name)
+owner.name = st.text_input("Owner name", value=owner.name, placeholder="Owner Name")
 owner.available_minutes = int(
     st.number_input(
         "Time I can spend on pet care today (minutes)",

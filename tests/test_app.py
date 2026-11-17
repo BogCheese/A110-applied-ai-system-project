@@ -266,5 +266,6 @@ def test_schedule_timeline_shows_busy_time_and_free_time(app):
 def test_no_sidebar_and_owner_name_is_editable(app):
     assert len(app.sidebar) == 0  # everything lives on the main page
     name_box = [t for t in app.text_input if t.label == "Owner name"][0]
+    assert name_box.value == "" and name_box.placeholder == "Owner Name"  # greyed hint, not a typed name
     name_box.set_value("Brandon").run()
     assert app.session_state.owner.name == "Brandon"
