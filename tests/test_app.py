@@ -376,3 +376,32 @@ def test_theme_file_is_valid_and_primary_colour_is_readable_with_white_text():
     contrast = 1.05 / (luminance(theme["primaryColor"]) + 0.05)  # white text on the primary colour
     assert contrast >= 4.5, f"primary colour contrast is only {contrast:.2f}:1"
     assert "light" in theme and "dark" in theme  # both appearances are styled
+
+
+# ---- night mode and background ----
+
+def test_night_mode_toggle_adds_and_removes_the_dark_css(app):
+    assert "invert(" not in calendar_html(app)  # off by default
+    [t for t in app.toggle if "Night mode" in t.label][0].set_value(True).run()
+    assert not app.exception
+    assert "invert(0.93) hue-rotate(180deg)" in calendar_html(app)
+    [t for t in app.toggle if "Night mode" in t.label][0].set_value(False).run()
+    assert "invert(" not in calendar_html(app)
+
+
+def test_night_mode_does_not_invert_when_streamlits_dark_theme_is_active(app, monkeypatch):
+    import streamlit as st
+
+    class DarkTheme:
+        type = "dark"
+
+    monkeypatch.setattr(type(st.context), "theme", property(lambda self: DarkTheme()))
+    [t for t in app.toggle if "Night mode" in t.label][0].set_value(True).run()
+    assert "invert(" not in calendar_html(app)  # inverting an already dark page would make it light
+
+
+def test_light_theme_background_is_plain_white():
+    import tomllib
+
+    config = tomllib.loads((Path(APP_PATH).parent / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+    assert config["theme"]["light"]["backgroundColor"].lower() == "#ffffff"

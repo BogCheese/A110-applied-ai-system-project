@@ -11,8 +11,8 @@ paddingTop = "2rem"
 paddingBottom = "3rem"
 
 [theme.light]
-backgroundColor = "#fbfaf6"
-secondaryBackgroundColor = "#eaf1ee"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f5f4"
 textColor = "#1c2b29"
 borderColor = "#d3ddd9"
 

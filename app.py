@@ -22,6 +22,18 @@ SPECIES_BADGE_COLORS = {"dog": "blue", "cat": "orange"}  # anything else is gray
 # Free gaps shorter than this are not worth listing in the timeline.
 MIN_FREE_GAP_MINUTES = 10
 
+# Night mode. Streamlit can't switch its theme from Python, so this flips the whole page's
+# colours with CSS instead: invert everything, then turn the hues back around so greens stay
+# green. 0.93 (not 1.0) makes white come out as a soft dark grey instead of pure black.
+NIGHT_MODE_CSS = """
+<style>
+html {
+    filter: invert(0.93) hue-rotate(180deg);
+    background: #ffffff;
+}
+</style>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -66,6 +78,22 @@ def show_flashes() -> None:
     """Show (and clear) the queued pop-up messages."""
     for message in st.session_state.pop("flash", []):
         st.toast(message)
+
+
+def apply_night_mode() -> None:
+    """Switch the page to night colours when the toggle is on.
+
+    Skipped when Streamlit's own dark theme is already active (chosen in its Settings menu or
+    by the computer's dark mode), because inverting an already dark page would make it light again.
+    """
+    if not st.session_state.get("night_mode"):
+        return
+    try:
+        already_dark = st.context.theme.type == "dark"
+    except Exception:  # the theme isn't known on the very first run
+        already_dark = False
+    if not already_dark:
+        st.html(NIGHT_MODE_CSS)
 
 
 def build_schedule_view(owner: Owner, plan) -> dict:
@@ -132,7 +160,7 @@ def render_schedule(view: dict) -> None:
             f"{view['total_minutes']} of {view['available_minutes']} minutes of task time "
             f"(gaps between tasks aren't counted)."
         )
-        calendar_col, list_col = st.columns([3, 2])
+        calendar_col, list_col = st.columns([3, 2], gap="large")
         with calendar_col:
             st.html(render_calendar_html(view["blocks"], view["pet_names"], view["day_start"], view["day_end"]))
         with list_col:
@@ -218,12 +246,16 @@ scheduler = Scheduler(owner)
 # Header
 # ---------------------------------------------------------------------------
 
-title_col, reset_col = st.columns([4, 1], vertical_alignment="center")
+title_col, night_col, reset_col = st.columns([5, 2, 2], vertical_alignment="center")
 with title_col:
     st.title("PawPal+", icon=":material/pets:")
     st.markdown("Care plans that fit your day, for every pet.")
+with night_col:
+    st.toggle(":material/dark_mode: Night mode", key="night_mode")
 with reset_col:
     st.button("Start over", icon=":material/restart_alt:", on_click=ask_reset, key="start_over", width="stretch")
+
+apply_night_mode()
 
 if st.session_state.get("confirm_reset"):
     with st.container(border=True):
@@ -240,20 +272,19 @@ with st.expander("How PawPal+ works", expanded=False):
 1. Set up your day: how many minutes you have, when your day starts (and optionally ends), and any busy times like work.
 2. Add your pets.
 3. Describe what you need and the **AI planner** adds tasks for you, or add tasks by hand.
-4. The schedule on the right updates as you go. It picks high-priority tasks first, places each at its
+4. The schedule below updates as you go. It picks high-priority tasks first, places each at its
    preferred time when that is free, and explains anything it had to leave out.
 5. Completing a daily or weekly task automatically creates the next one.
 """
     )
 
-# Set up on the left, results on the right, so you can see the schedule change as you fill things in.
-left, right = st.columns([2, 3], gap="large")
-
 # ---------------------------------------------------------------------------
-# Left: your day, your pets, the AI planner
+# Top row: your day (left) and your pets (right)
 # ---------------------------------------------------------------------------
 
-with left:
+day_col, pets_col = st.columns(2, gap="large")
+
+with day_col:
     st.header("Your day")
     owner.name = st.text_input("Pet Owner", value=owner.name, placeholder="Name")
     owner.available_minutes = int(
@@ -297,7 +328,7 @@ with left:
                 owner.remove_busy_block(block)
                 st.rerun()
 
-    # ---- pets ----
+with pets_col:
     st.header("Your pets")
     if not owner.pets:
         st.info("Add your first pet to get started. Then you can plan their care with AI or add tasks by hand.")
@@ -341,257 +372,255 @@ with left:
                     width="stretch",
                 )
 
-    # ---- AI planner ----
-    if owner.pets:
-        st.header("Plan with AI")
-        st.markdown(
-            "Describe a goal and the AI proposes tasks for your pets. PawPal+ then checks them for time "
-            "conflicts and available minutes, and sends any problems back to the AI to fix before adding anything."
-        )
-        with st.container(border=True):
-            st.markdown("**The AI is automatically given this about you** (change it in the sections above):")
-            st.markdown(context_markdown(owner))
-
-        first_pet = owner.pets[0].name
-        examples = {
-            "New pet routine": f"Create a daily care routine for {first_pet}: feeding, play, and a short grooming session.",
-            "Weekly health check": f"Add a weekly nail trim and weigh-in for {first_pet}, plus daily feeding.",
-            "Busy workday": f"Plan a light care routine for {first_pet} that fits around my busy times.",
-        }
-        st.markdown("Try an example:")
-        with st.container(horizontal=True):
-            for label, text in examples.items():
-                st.button(label, key=f"example_{label}", on_click=set_goal, args=(text,))
-
-        goal = st.text_area(
-            "What should PawPal+ plan?",
-            key="planner_goal",
-            placeholder="I just adopted a puppy, set up a daily care routine.",
-        )
-        if st.button("Plan with AI", icon=":material/auto_awesome:", width="stretch"):
-            try:
-                with st.spinner("Planning, checking, and revising..."):
-                    result = PlannerAgent(make_client()).run(owner, goal)
-            except AgentError as error:
-                st.session_state.pop("agent_result", None)
-                st.error(str(error))
-            else:
-                st.session_state.agent_result = result
-                flash(f"AI planner added {len(result.tasks)} task(s).")
-                # Re-run so the schedule and task list show the new tasks. The result is kept in
-                # session_state, so it is still displayed (and after later clicks).
-                st.rerun()
-
-        agent_result = st.session_state.get("agent_result")
-        if agent_result:
-            if agent_result.success and not agent_result.tasks:
-                st.info("Nothing new to add: those tasks already exist.")
-            elif agent_result.success:
-                st.success(
-                    f"Added {len(agent_result.tasks)} task(s) after {agent_result.attempts} attempt(s). "
-                    "All checks passed."
-                )
-            else:
-                st.warning("Tasks were added, but some problems remain. Review the conflicts on the right.")
-                for issue in agent_result.issues:
-                    st.write(f"- {issue}")
-            if agent_result.duplicates:
-                st.markdown("Skipped because they already exist: " + "; ".join(agent_result.duplicates))
-            with st.expander("What the agent did", expanded=True):
-                for step in agent_result.steps:
-                    st.write(f"**{step.kind}**: {step.detail}")
-
 # ---------------------------------------------------------------------------
-# Right: today's schedule (rebuilt automatically), then the tasks
+# Below: everything else, top to bottom
 # ---------------------------------------------------------------------------
 
-with right:
-    if not owner.pets:
-        with st.container(border=True):
-            st.markdown("### Your schedule will appear here")
-            st.markdown("Add a pet on the left, then ask the AI planner for a routine or add tasks yourself.")
+if not owner.pets:
+    with st.container(border=True):
+        st.markdown("### Your schedule will appear here")
+        st.markdown("Add a pet above, then ask the AI planner for a routine or add tasks yourself.")
+    st.stop()
+
+# ---- AI planner ----
+st.header("Plan with AI")
+st.markdown(
+    "Describe a goal and the AI proposes tasks for your pets. PawPal+ then checks them for time "
+    "conflicts and available minutes, and sends any problems back to the AI to fix before adding anything."
+)
+context_col, goal_col = st.columns(2, gap="large")
+with context_col:
+    with st.container(border=True):
+        st.markdown("**The AI is automatically given this about you** (change it in the sections above):")
+        st.markdown(context_markdown(owner))
+
+with goal_col:
+    first_pet = owner.pets[0].name
+    examples = {
+        "New pet routine": f"Create a daily care routine for {first_pet}: feeding, play, and a short grooming session.",
+        "Weekly health check": f"Add a weekly nail trim and weigh-in for {first_pet}, plus daily feeding.",
+        "Busy workday": f"Plan a light care routine for {first_pet} that fits around my busy times.",
+    }
+    st.markdown("Try an example:")
+    with st.container(horizontal=True):
+        for label, text in examples.items():
+            st.button(label, key=f"example_{label}", on_click=set_goal, args=(text,))
+
+    goal = st.text_area(
+        "What should PawPal+ plan?",
+        key="planner_goal",
+        placeholder="I just adopted a puppy, set up a daily care routine.",
+    )
+    if st.button("Plan with AI", icon=":material/auto_awesome:", width="stretch"):
+        try:
+            with st.spinner("Planning, checking, and revising..."):
+                result = PlannerAgent(make_client()).run(owner, goal)
+        except AgentError as error:
+            st.session_state.pop("agent_result", None)
+            st.error(str(error))
+        else:
+            st.session_state.agent_result = result
+            flash(f"AI planner added {len(result.tasks)} task(s).")
+            # Re-run so the schedule and task list show the new tasks. The result is kept in
+            # session_state, so it is still displayed (and after later clicks).
+            st.rerun()
+
+agent_result = st.session_state.get("agent_result")
+if agent_result:
+    if agent_result.success and not agent_result.tasks:
+        st.info("Nothing new to add: those tasks already exist.")
+    elif agent_result.success:
+        st.success(
+            f"Added {len(agent_result.tasks)} task(s) after {agent_result.attempts} attempt(s). All checks passed."
+        )
     else:
-        st.header("Today's schedule")
-        if owner.get_all_tasks():
-            # Rebuilt on every run, so it always matches the tasks and settings on screen.
-            render_schedule(build_schedule_view(owner, scheduler.generate_plan()))
-        else:
-            st.info("No tasks yet. Use the AI planner, or add one by hand below, and your schedule appears here.")
+        st.warning("Tasks were added, but some problems remain. Review the conflicts under your tasks.")
+        for issue in agent_result.issues:
+            st.write(f"- {issue}")
+    if agent_result.duplicates:
+        st.markdown("Skipped because they already exist: " + "; ".join(agent_result.duplicates))
+    with st.expander("What the agent did", expanded=True):
+        for step in agent_result.steps:
+            st.write(f"**{step.kind}**: {step.detail}")
 
-        # ---- tasks, grouped by pet ----
-        st.header("Your tasks")
-        if owner.get_all_tasks():
-            status = (
-                st.segmented_control("Filter by status", ["All", "To do", "Done"], default="All", key="status_filter")
-                or "All"
+# ---- schedule (rebuilt automatically) ----
+st.header("Today's schedule")
+if owner.get_all_tasks():
+    # Rebuilt on every run, so it always matches the tasks and settings on screen.
+    render_schedule(build_schedule_view(owner, scheduler.generate_plan()))
+else:
+    st.info("No tasks yet. Use the AI planner, or add one by hand below, and your schedule appears here.")
+
+# ---- tasks, grouped by pet ----
+st.header("Your tasks")
+if owner.get_all_tasks():
+    status = (
+        st.segmented_control("Filter by status", ["All", "To do", "Done"], default="All", key="status_filter") or "All"
+    )
+    completed_filter = {"All": None, "To do": False, "Done": True}[status]
+
+    shown_any = False
+    for pet in owner.pets:
+        # Owner.filter_tasks narrows the list; Scheduler.sort_by_time puts it in time order.
+        pet_tasks = scheduler.sort_by_time(
+            [t for t in owner.filter_tasks(pet_name=pet.name, completed=completed_filter) if t in pet.tasks]
+        )
+        if not pet_tasks:
+            continue
+        shown_any = True
+        with st.container(border=True):
+            st.markdown(f":material/pets: **{md_escape(pet.name)}** · {len(pet_tasks)} task(s)")
+            st.table(
+                [
+                    {
+                        "Time": format_time(t.preferred_time) if t.preferred_time is not None else "Any time",
+                        "Task": md_escape(t.title),
+                        "Minutes": t.duration_minutes,
+                        "Priority": PRIORITY_BADGES[t.priority],
+                        "Repeats / due": f"{t.frequency.value.title()}, due "
+                        + ("today" if t.due_date <= date.today() else f"{t.due_date:%b %d}"),
+                        "Status": ":green-badge[Done]" if t.completed else "To do",
+                    }
+                    for t in pet_tasks
+                ],
+                hide_index=True,
             )
-            completed_filter = {"All": None, "To do": False, "Done": True}[status]
+    if not shown_any:
+        st.info("No tasks match this filter.")
 
-            shown_any = False
-            for pet in owner.pets:
-                # Owner.filter_tasks narrows the list; Scheduler.sort_by_time puts it in time order.
-                pet_tasks = scheduler.sort_by_time(
-                    [t for t in owner.filter_tasks(pet_name=pet.name, completed=completed_filter) if t in pet.tasks]
-                )
-                if not pet_tasks:
-                    continue
-                shown_any = True
-                with st.container(border=True):
-                    st.markdown(f":material/pets: **{md_escape(pet.name)}** · {len(pet_tasks)} task(s)")
-                    st.table(
-                        [
-                            {
-                                "Time": format_time(t.preferred_time) if t.preferred_time is not None else "Any time",
-                                "Task": md_escape(t.title),
-                                "Minutes": t.duration_minutes,
-                                "Priority": PRIORITY_BADGES[t.priority],
-                                "Repeats / due": f"{t.frequency.value.title()}, due "
-                                + ("today" if t.due_date <= date.today() else f"{t.due_date:%b %d}"),
-                                "Status": ":green-badge[Done]" if t.completed else "To do",
-                            }
-                            for t in pet_tasks
-                        ],
-                        hide_index=True,
-                    )
-            if not shown_any:
-                st.info("No tasks match this filter.")
+    # Tell the owner about clashes now, while they can still fix them.
+    conflicts = scheduler.detect_conflicts()
+    if conflicts:
+        for message in conflicts:
+            st.warning(message)
+        st.markdown(
+            "To fix a conflict, change one task's time. If you leave it, the scheduler keeps the "
+            "higher-priority task at its time and moves the other to the next free slot."
+        )
+    else:
+        st.success("No time conflicts between your tasks.")
+else:
+    st.info("No tasks yet. Use the AI planner, or add one below.")
 
-            # Tell the owner about clashes now, while they can still fix them.
-            conflicts = scheduler.detect_conflicts()
-            if conflicts:
-                for message in conflicts:
-                    st.warning(message)
-                st.markdown(
-                    "To fix a conflict, change one task's time. If you leave it, the scheduler keeps the "
-                    "higher-priority task at its time and moves the other to the next free slot."
+st.subheader("Manage tasks")
+add_tab, done_tab, edit_tab = st.tabs(["Add a task", "Mark done", "Edit or delete"])
+
+with add_tab:
+    # Select by position, then look the pet up in owner.pets. Streamlit hands back a
+    # *copy* of objects passed to selectbox, and a task added to a copy would be lost.
+    # The pet picker is outside the form so changing it updates the suggested title at once.
+    pet_index = st.selectbox("Add task for", range(len(owner.pets)), format_func=lambda i: owner.pets[i].name)
+    selected_pet = owner.pets[pet_index]
+
+    with st.form("add_task_form"):
+        title_field, minutes_field = st.columns([3, 1])
+        # A different key per species gives each species its own starting title.
+        task_title = title_field.text_input(
+            "New task title",
+            value=DEFAULT_TASK_TITLES.get(selected_pet.species, "Daily care"),
+            key=f"task_title_{selected_pet.species}",
+        )
+        duration = minutes_field.number_input("New task minutes", min_value=1, max_value=240, value=20)
+        priority_field, often_field, time_field = st.columns(3)
+        priority = priority_field.selectbox(
+            "New task priority",
+            list(Priority),
+            index=2,
+            format_func=lambda p: p.name.title(),
+            help="High priority tasks are scheduled first when time is short.",
+        )
+        frequency = often_field.selectbox(
+            "How often",
+            list(Frequency),
+            format_func=lambda f: f.value.title(),
+            help="Daily and weekly tasks create the next one when you complete them.",
+        )
+        with time_field:
+            preferred_time = time_picker("New task preferred time", None, key="task_time", none_label="Any time")
+        add_task_clicked = st.form_submit_button("Add task", icon=":material/add:")
+
+    if add_task_clicked:
+        # Pet.add_task stores the Task on the selected pet (and records the pet's name on it).
+        selected_pet.add_task(Task(task_title, int(duration), priority, frequency, preferred_time=preferred_time))
+        flash(f"Added '{task_title}' for {selected_pet.name}.")
+        st.rerun()
+
+with done_tab:
+    pending = [(pet, task) for pet in owner.pets for task in pet.tasks if not task.completed]
+    if pending:
+        pending_index = st.selectbox(
+            "Task to mark done",
+            range(len(pending)),
+            format_func=lambda i: f"{pending[i][1].title} ({pending[i][0].name})",
+        )
+        if st.button("Mark complete", icon=":material/check:"):
+            pet, task = pending[pending_index]
+            # Pet.complete_task also adds the next occurrence if the task repeats.
+            next_task = pet.complete_task(task)
+            if next_task:
+                flash(
+                    f"Done! '{task.title}' repeats {task.frequency.value}, "
+                    f"next one is due {next_task.due_date:%b %d}."
                 )
             else:
-                st.success("No time conflicts between your tasks.")
-        else:
-            st.info("No tasks yet. Use the AI planner, or add one below.")
+                flash(f"Done! '{task.title}' is complete.")
+            st.rerun()
+    else:
+        st.markdown("Nothing left to do. 🎉")
 
-        st.subheader("Manage tasks")
-        add_tab, done_tab, edit_tab = st.tabs(["Add a task", "Mark done", "Edit or delete"])
-
-        with add_tab:
-            # Select by position, then look the pet up in owner.pets. Streamlit hands back a
-            # *copy* of objects passed to selectbox, and a task added to a copy would be lost.
-            # The pet picker is outside the form so changing it updates the suggested title at once.
-            pet_index = st.selectbox(
-                "Add task for", range(len(owner.pets)), format_func=lambda i: owner.pets[i].name
+with edit_tab:
+    all_tasks = [(pet, task) for pet in owner.pets for task in pet.tasks]
+    if all_tasks:
+        # Pick by position (see the note above about Streamlit copying objects).
+        edit_index = st.selectbox(
+            "Task to edit",
+            range(len(all_tasks)),
+            format_func=lambda i: f"{all_tasks[i][1].title} ({all_tasks[i][0].name})"
+            + (" - done" if all_tasks[i][1].completed else ""),
+            key=f"edit_pick_{len(all_tasks)}",
+        )
+        edit_pet, edit_task = all_tasks[edit_index]
+        # The form is keyed by the task so its fields reset to the chosen task's values.
+        with st.form(f"edit_form_{edit_task.id}"):
+            edit_title_field, edit_minutes_field = st.columns([3, 1])
+            new_title = edit_title_field.text_input("Edit title", value=edit_task.title)
+            new_duration = edit_minutes_field.number_input(
+                "Edit minutes", min_value=1, max_value=240, value=min(edit_task.duration_minutes, 240)
             )
-            selected_pet = owner.pets[pet_index]
+            edit_priority_field, edit_often_field, edit_time_field = st.columns(3)
+            new_priority = edit_priority_field.selectbox(
+                "Edit priority",
+                list(Priority),
+                index=list(Priority).index(edit_task.priority),
+                format_func=lambda p: p.name.title(),
+            )
+            new_frequency = edit_often_field.selectbox(
+                "Edit how often",
+                list(Frequency),
+                index=list(Frequency).index(edit_task.frequency),
+                format_func=lambda f: f.value.title(),
+            )
+            with edit_time_field:
+                new_time = time_picker(
+                    "Edit preferred time", edit_task.preferred_time, key=f"edit_time_{edit_task.id}", none_label="Any time"
+                )
+            save_clicked = st.form_submit_button("Save changes", icon=":material/save:")
+            delete_clicked = st.form_submit_button("Delete task", icon=":material/delete:")
 
-            with st.form("add_task_form"):
-                form_left, form_right = st.columns(2)
-                # A different key per species gives each species its own starting title.
-                task_title = form_left.text_input(
-                    "New task title",
-                    value=DEFAULT_TASK_TITLES.get(selected_pet.species, "Daily care"),
-                    key=f"task_title_{selected_pet.species}",
-                )
-                duration = form_right.number_input("New task minutes", min_value=1, max_value=240, value=20)
-                priority = form_left.selectbox(
-                    "New task priority",
-                    list(Priority),
-                    index=2,
-                    format_func=lambda p: p.name.title(),
-                    help="High priority tasks are scheduled first when time is short.",
-                )
-                frequency = form_right.selectbox(
-                    "How often",
-                    list(Frequency),
-                    format_func=lambda f: f.value.title(),
-                    help="Daily and weekly tasks create the next one when you complete them.",
-                )
-                preferred_time = time_picker("New task preferred time", None, key="task_time", none_label="Any time")
-                add_task_clicked = st.form_submit_button("Add task", icon=":material/add:")
-
-            if add_task_clicked:
-                # Pet.add_task stores the Task on the selected pet (and records the pet's name on it).
-                selected_pet.add_task(
-                    Task(task_title, int(duration), priority, frequency, preferred_time=preferred_time)
-                )
-                flash(f"Added '{task_title}' for {selected_pet.name}.")
-                st.rerun()
-
-        with done_tab:
-            pending = [(pet, task) for pet in owner.pets for task in pet.tasks if not task.completed]
-            if pending:
-                pending_index = st.selectbox(
-                    "Task to mark done",
-                    range(len(pending)),
-                    format_func=lambda i: f"{pending[i][1].title} ({pending[i][0].name})",
-                )
-                if st.button("Mark complete", icon=":material/check:"):
-                    pet, task = pending[pending_index]
-                    # Pet.complete_task also adds the next occurrence if the task repeats.
-                    next_task = pet.complete_task(task)
-                    if next_task:
-                        flash(
-                            f"Done! '{task.title}' repeats {task.frequency.value}, "
-                            f"next one is due {next_task.due_date:%b %d}."
-                        )
-                    else:
-                        flash(f"Done! '{task.title}' is complete.")
-                    st.rerun()
-            else:
-                st.markdown("Nothing left to do. 🎉")
-
-        with edit_tab:
-            all_tasks = [(pet, task) for pet in owner.pets for task in pet.tasks]
-            if all_tasks:
-                # Pick by position (see the note above about Streamlit copying objects).
-                edit_index = st.selectbox(
-                    "Task to edit",
-                    range(len(all_tasks)),
-                    format_func=lambda i: f"{all_tasks[i][1].title} ({all_tasks[i][0].name})"
-                    + (" - done" if all_tasks[i][1].completed else ""),
-                    key=f"edit_pick_{len(all_tasks)}",
-                )
-                edit_pet, edit_task = all_tasks[edit_index]
-                # The form is keyed by the task so its fields reset to the chosen task's values.
-                with st.form(f"edit_form_{edit_task.id}"):
-                    new_title = st.text_input("Edit title", value=edit_task.title)
-                    edit_left, edit_right = st.columns(2)
-                    new_duration = edit_left.number_input(
-                        "Edit minutes", min_value=1, max_value=240, value=min(edit_task.duration_minutes, 240)
-                    )
-                    new_priority = edit_right.selectbox(
-                        "Edit priority",
-                        list(Priority),
-                        index=list(Priority).index(edit_task.priority),
-                        format_func=lambda p: p.name.title(),
-                    )
-                    new_frequency = edit_left.selectbox(
-                        "Edit how often",
-                        list(Frequency),
-                        index=list(Frequency).index(edit_task.frequency),
-                        format_func=lambda f: f.value.title(),
-                    )
-                    new_time = time_picker(
-                        "Edit preferred time",
-                        edit_task.preferred_time,
-                        key=f"edit_time_{edit_task.id}",
-                        none_label="Any time",
-                    )
-                    save_clicked = st.form_submit_button("Save changes", icon=":material/save:")
-                    delete_clicked = st.form_submit_button("Delete task", icon=":material/delete:")
-
-                if save_clicked:
-                    edit_pet.edit_task(
-                        edit_task,
-                        title=new_title.strip() or edit_task.title,
-                        duration_minutes=int(new_duration),
-                        priority=new_priority,
-                        frequency=new_frequency,
-                        preferred_time=new_time,
-                    )
-                    flash(f"Saved changes to '{edit_task.title}'.")
-                    st.rerun()
-                if delete_clicked:
-                    edit_pet.remove_task(edit_task)
-                    flash(f"Deleted '{edit_task.title}'.")
-                    st.rerun()
-            else:
-                st.markdown("No tasks to edit yet.")
+        if save_clicked:
+            edit_pet.edit_task(
+                edit_task,
+                title=new_title.strip() or edit_task.title,
+                duration_minutes=int(new_duration),
+                priority=new_priority,
+                frequency=new_frequency,
+                preferred_time=new_time,
+            )
+            flash(f"Saved changes to '{edit_task.title}'.")
+            st.rerun()
+        if delete_clicked:
+            edit_pet.remove_task(edit_task)
+            flash(f"Deleted '{edit_task.title}'.")
+            st.rerun()
+    else:
+        st.markdown("No tasks to edit yet.")
