@@ -1,0 +1,24 @@
+# PawPal+ look and feel. Edit colours here, not in app.py.
+# A calm teal accent on a warm off-white page, with a matching dark mode that
+# users can switch to from the app's settings menu.
+
+[theme]
+primaryColor = "#0f766e"   # teal; white text on it is 5.5:1, above the 4.5:1 AA minimum
+linkColor = "#0f766e"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+baseRadius = "0.75rem"
+paddingTop = "2rem"
+paddingBottom = "3rem"
+
+[theme.light]
+backgroundColor = "#fbfaf6"
+secondaryBackgroundColor = "#eaf1ee"
+textColor = "#1c2b29"
+borderColor = "#d3ddd9"
+
+[theme.dark]
+backgroundColor = "#0f1716"
+secondaryBackgroundColor = "#18231f"
+textColor = "#e8f0ee"
+borderColor = "#2b3a36"
+linkColor = "#5eead4"
