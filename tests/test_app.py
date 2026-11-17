@@ -47,6 +47,29 @@ def click(at, label):
     return at.run()
 
 
+def tick(at, task):
+    """Tick a task's checkbox in the list view."""
+    at.checkbox(key=f"done_{task.id}").check()
+    return at.run()
+
+
+def untick(at, task):
+    at.checkbox(key=f"done_{task.id}").uncheck()
+    return at.run()
+
+
+def click_for(at, task, action):
+    """Press 'save' or 'delete' in a task's Edit popover."""
+    at.button(key=f"edit_{action}_{task.id}").click()
+    return at.run()
+
+
+def edit_field(at, kind, task):
+    """One of a task's Edit fields: kind is title, minutes, priority, often or time."""
+    widget = {"title": at.text_input, "minutes": at.number_input}.get(kind, at.selectbox)
+    return widget(key=f"edit_{kind}_{task.id}")
+
+
 def pick(at, label, text):
     """Choose a dropdown option by the text the user sees (e.g. '8:30 AM')."""
     box = [b for b in at.selectbox if b.label == label][0]
@@ -95,7 +118,9 @@ def test_every_input_has_a_unique_label(app):
     """Duplicate labels make controls ambiguous for screen reader users."""
     app.session_state.owner.pets[0].add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
     app.run()
-    widgets = [*app.selectbox, *app.text_input, *app.number_input, *app.text_area, *app.radio]
+    # The Edit popovers repeat once per task by design; their widgets have keys starting "edit_".
+    widgets = [w for w in (*app.selectbox, *app.text_input, *app.number_input, *app.text_area, *app.radio)
+               if not (w.key or "").startswith("edit_")]
     labels = [w.label for w in widgets]
     assert len(labels) == len(set(labels)), sorted(l for l in labels if labels.count(l) > 1)
 
@@ -194,22 +219,22 @@ def test_task_can_be_edited_and_deleted(app):
     pet.add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
     app.run()
 
-    [t for t in app.text_input if t.label == "Edit title"][0].set_value("Laser play")
-    [n for n in app.number_input if n.label == "Edit minutes"][0].set_value(25)
-    click(app, "Save changes")
     task = pet.tasks[0]
+    edit_field(app, "title", task).set_value("Laser play")
+    edit_field(app, "minutes", task).set_value(25)
+    click_for(app, task, "save")
     assert (task.title, task.duration_minutes) == ("Laser play", 25)
 
-    click(app, "Delete task")
+    click_for(app, task, "delete")
     assert pet.tasks == []
     assert not app.exception
 
 
-def test_mark_complete_creates_the_next_occurrence(app):
+def test_ticking_the_checkbox_creates_the_next_occurrence(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.DAILY))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     assert [t.completed for t in pet.tasks] == [True, False]
     assert any("Done!" in t.value for t in app.toast)
 
@@ -459,11 +484,12 @@ def test_marking_done_keeps_the_task_on_the_calendar_with_a_check(app):
     """Reported bug: done tasks disappeared from the calendar and the list."""
     app.session_state.owner.pets[0].add_task(Task("Feed", 10, Priority.HIGH, Frequency.ONCE, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    task = app.session_state.owner.pets[0].tasks[0]
+    tick(app, task)
     html = calendar_html(app)
     assert "Feed" in html and "✓ " in html and "line-through" in html and "Done" in html
-    text = page_text(app)
-    assert "✅ Feed (Nala)" in text and "· done" in text  # still in the list view, ticked
+    assert "~~Feed (Nala)~~" in page_text(app)  # still in the list view, crossed out
+    assert app.checkbox(key=f"done_{task.id}").value is True
     assert any("(1 done)" in s.value for s in app.success)
     assert app.table[0].value["Status"][0] == ":green-badge[Done]"  # and in the task table
 
@@ -474,32 +500,32 @@ def test_done_task_does_not_make_the_rest_of_the_day_shift(app):
     pet.add_task(Task("Second", 20, Priority.LOW, Frequency.ONCE))
     app.run()
     before = page_text(app)
-    click(app, "Mark complete")  # the first task in the list is "First"
+    tick(app, pet.tasks[0])  # "First"
     after = page_text(app)
     assert "**8:00 AM – 8:30 AM**" in before and "**8:00 AM – 8:30 AM**" in after
     assert "**8:35 AM – 8:55 AM** · Second (Nala)" in before and "**8:35 AM – 8:55 AM** · Second (Nala)" in after
 
 
 def test_a_repeating_task_cannot_be_marked_done_over_and_over(app):
-    """Reported bug: clicking Mark complete repeatedly made endless 'Done, due tomorrow' copies."""
+    """Reported bug: completing repeatedly made endless 'Done, due tomorrow' copies."""
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Morning Feeding", 15, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60 + 20))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     assert len(pet.tasks) == 2  # the done one and tomorrow's copy
-    for _ in range(3):
-        if "Mark complete" in [b.label for b in app.button]:
-            click(app, "Mark complete")
+    copy = pet.tasks[1]
+    assert not [c for c in app.checkbox if c.key == f"done_{copy.id}"]  # no box for a task not due yet
     assert len(pet.tasks) == 2  # still exactly two: nothing more can be completed today
-    assert "Mark complete" not in [b.label for b in app.button]
-    assert "Nothing due right now" in page_text(app) and "Upcoming tasks" in page_text(app)
+    # The copy can still be edited, from the "not on today's schedule" section.
+    assert any(e.label == "Not on today's schedule (1)" for e in app.expander)
+    assert f"edit_save_{copy.id}" in [b.key for b in app.button]
 
 
 def test_tomorrows_copy_is_listed_as_to_do_but_not_on_todays_schedule(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     table = app.table[0].value
     assert list(table["Status"]) == [":green-badge[Done]", "To do"]
     assert "due today" in table["Repeats / due"][0] and "due today" not in table["Repeats / due"][1]
@@ -510,46 +536,58 @@ def test_marking_done_by_mistake_can_be_undone(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    first = pet.tasks[0]
+    tick(app, first)
     assert len(pet.tasks) == 2
-    click(app, "Mark not done")
+    untick(app, first)
     assert [t.completed for t in pet.tasks] == [False] and len(pet.tasks) == 1  # tomorrow's copy is gone too
     assert "✓" not in calendar_html(app) and "line-through" not in calendar_html(app)
+    assert "~~" not in page_text(app)
     assert any("back on your to-do list" in t.value for t in app.toast)
-    assert "Mark not done" not in [b.label for b in app.button]  # nothing left to undo
+    assert app.checkbox(key=f"done_{first.id}").value is False
 
 
-def test_undo_is_only_offered_for_tasks_finished_today(app):
+def test_a_task_finished_on_another_day_has_no_checkbox(app):
     pet = app.session_state.owner.pets[0]
     old = Task("Old", 10, Priority.LOW, Frequency.ONCE)
     pet.add_task(old)
     old.mark_complete()
     old.completed_on = date.today() - timedelta(days=1)
     app.run()
-    assert "Mark not done" not in [b.label for b in app.button]
+    assert not [c for c in app.checkbox if c.key == f"done_{old.id}"]  # not on today's list, nothing to untick
+    assert f"edit_save_{old.id}" in [b.key for b in app.button]  # but it can still be edited
 
 
-def test_mark_done_only_offers_tasks_that_are_due(app):
+def test_only_tasks_on_todays_list_get_a_checkbox(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Due today", 10, Priority.LOW, Frequency.ONCE))
     pet.add_task(Task("Next week", 10, Priority.LOW, Frequency.ONCE, due_date=date.today() + timedelta(days=7)))
     app.run()
-    options = [s for s in app.selectbox if s.label == "Task to mark done"][0].options
-    assert list(options) == ["Due today (Nala)"]
+    assert [c.key for c in app.checkbox] == [f"done_{pet.tasks[0].id}"]
+
+
+def test_the_old_manage_tabs_are_gone(app):
+    pet = app.session_state.owner.pets[0]
+    pet.add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
+    app.run()
+    assert not app.tabs
+    assert not [b for b in app.button if b.label in ("Mark complete", "Mark not done")]
+    assert "Task to mark done" not in [s.label for s in app.selectbox]
+    assert "Task to edit" not in [s.label for s in app.selectbox]
 
 
 def test_every_edit_field_can_be_changed(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE))
     app.run()
-    [t for t in app.text_input if t.label == "Edit title"][0].set_value("Laser play")
-    [n for n in app.number_input if n.label == "Edit minutes"][0].set_value(25)
-    [s for s in app.selectbox if s.label == "Edit priority"][0].select(Priority.HIGH)
-    [s for s in app.selectbox if s.label == "Edit how often"][0].select(Frequency.DAILY)
-    time_box = [s for s in app.selectbox if s.label == "Edit preferred time"][0]
-    time_box.select_index(time_box.options.index("9:15 AM"))
-    click(app, "Save changes")
     task = pet.tasks[0]
+    edit_field(app, "title", task).set_value("Laser play")
+    edit_field(app, "minutes", task).set_value(25)
+    edit_field(app, "priority", task).select(Priority.HIGH)
+    edit_field(app, "often", task).select(Frequency.DAILY)
+    time_box = edit_field(app, "time", task)
+    time_box.select_index(time_box.options.index("9:15 AM"))
+    click_for(app, task, "save")
     assert (task.title, task.duration_minutes, task.priority, task.frequency, task.preferred_time) == (
         "Laser play", 25, Priority.HIGH, Frequency.DAILY, 9 * 60 + 15)
     html = calendar_html(app)
@@ -560,10 +598,11 @@ def test_editing_can_clear_the_preferred_time_and_a_blank_title_keeps_the_old_on
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE, preferred_time=9 * 60))
     app.run()
-    [t for t in app.text_input if t.label == "Edit title"][0].set_value("   ")
-    time_box = [s for s in app.selectbox if s.label == "Edit preferred time"][0]
+    task = pet.tasks[0]
+    edit_field(app, "title", task).set_value("   ")
+    time_box = edit_field(app, "time", task)
     time_box.select_index(time_box.options.index("Any time"))
-    click(app, "Save changes")
+    click_for(app, task, "save")
     assert pet.tasks[0].title == "Play" and pet.tasks[0].preferred_time is None
 
 
@@ -571,9 +610,10 @@ def test_a_done_task_can_be_edited_and_stays_done(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.ONCE, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
-    [t for t in app.text_input if t.label == "Edit title"][0].set_value("Big feed")
-    click(app, "Save changes")
+    task = pet.tasks[0]
+    tick(app, task)
+    edit_field(app, "title", task).set_value("Big feed")
+    click_for(app, task, "save")
     assert pet.tasks[0].title == "Big feed" and pet.tasks[0].completed is True
     assert "Big feed" in calendar_html(app) and "✓ " in calendar_html(app)
 
@@ -583,7 +623,7 @@ def test_deleting_a_task_removes_it_from_the_calendar_and_list(app):
     pet.add_task(Task("Play", 10, Priority.LOW, Frequency.ONCE, preferred_time=9 * 60))
     app.run()
     assert "Play" in calendar_html(app)
-    click(app, "Delete task")
+    click_for(app, pet.tasks[0], "delete")
     assert pet.tasks == [] and "Play" not in calendar_html(app) and "Play (Nala)" not in page_text(app)
 
 
@@ -591,8 +631,9 @@ def test_deleting_a_done_task_leaves_tomorrows_copy_alone(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
-    click(app, "Delete task")  # the first task in the edit list is the done one
+    done = pet.tasks[0]
+    tick(app, done)
+    click_for(app, done, "delete")
     assert [t.completed for t in pet.tasks] == [False]
     assert pet.tasks[0].due_date == date.today() + timedelta(days=1)
 
@@ -601,7 +642,7 @@ def test_done_filter_and_to_do_filter_show_the_right_tasks(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.DAILY, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     app.segmented_control[0].set_value("Done").run()
     assert list(app.table[0].value["Task"]) == ["Feed"] and app.table[0].value["Status"][0] == ":green-badge[Done]"
     app.segmented_control[0].set_value("To do").run()
@@ -612,18 +653,18 @@ def test_a_task_added_after_marking_done_gets_its_own_slot(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 30, Priority.HIGH, Frequency.ONCE, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     add_task_through_the_form(app, "Play", minutes=15, time_text="8:00 AM")  # same slot as the done task
     text = page_text(app)
-    assert "✅ Feed (Nala)" in text and "Play (Nala)" in text
-    assert "**8:00 AM – 8:30 AM** · ✅ Feed" in text  # the done task keeps 8:00; Play moved to the next free slot
+    assert "~~Feed (Nala)~~" in text and "Play (Nala)" in text
+    assert "**8:00 AM – 8:30 AM** · ~~Feed" in text  # the done task keeps 8:00; Play moved to the next free slot
 
 
 def test_ai_planner_still_works_with_finished_tasks_present(app):
     pet = app.session_state.owner.pets[0]
     pet.add_task(Task("Feed", 10, Priority.HIGH, Frequency.ONCE, preferred_time=8 * 60))
     app.run()
-    click(app, "Mark complete")
+    tick(app, pet.tasks[0])
     app.text_area[0].set_value("plan").run()
     click(app, "Plan with AI")
     assert not app.exception

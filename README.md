@@ -210,7 +210,7 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 - **Today's schedule:** a calendar and a list, rebuilt automatically. Every block names its pet. Tasks you finish stay in place with a check mark, a struck-through title and "Done".
 - **Your tasks:** tasks grouped by pet, in time order, with coloured priority badges, filtered by status (all, to do, done).
 - **Conflict warnings:** if two tasks' preferred times overlap, a warning names both tasks and tells you how to fix it.
-- **Manage tasks:** add a task (a blank title is refused), mark a task done (only tasks that are due are offered, and finishing a repeating one creates tomorrow's copy), undo a task marked done by mistake, or edit and delete a task.
+- **Manage tasks:** add a task (a blank title is refused). In the list view, tick a task's checkbox to mark it done (it is crossed out here and on the calendar, and finishing a repeating one creates tomorrow's copy); untick it to undo. Each row also has an Edit button that opens a popover to change or delete the task. Tasks that are not on today's list (due later, or left out) can be edited from the sections under the schedule.
 
 ### Example workflow
 
@@ -219,7 +219,7 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 3. Add a "Walk" for Buddy (30 min, high priority, daily, 9:00 AM) and "Meds" for Mia (10 min, high priority, once, 9:00 AM).
 4. Look at the task table, which is sorted by time. A conflict warning appears because both tasks want 9:00 AM.
 5. Look at today's schedule (it updates by itself). Meds (shorter, so it goes first) keeps 9:00 AM, and Walk moves to the earliest free slot at 8:00 AM. Hover a block on the calendar to see why it was placed there.
-6. Open **Mark done** under Manage tasks and mark "Walk" done. It stays on today's schedule with a check mark, and because it is daily the app creates tomorrow's Walk. Marked it by mistake? Use **Mark not done** and the copy is taken back.
+6. Tick the checkbox next to "Walk" in the list view. It is crossed out and stays on today's schedule, and because it is daily the app creates tomorrow's Walk. Ticked it by mistake? Untick it and the copy is taken back.
 
 ### Scheduler behaviors shown
 
