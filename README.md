@@ -2,6 +2,8 @@
 
 **Code:** https://github.com/BogCheese/A110-applied-ai-system-project · **Design and reflection:** [model_card.md](model_card.md) · **Diagram:** [diagrams/architecture.mmd](diagrams/architecture.mmd) · **Captured run logs:** [evals/sample_output.txt](evals/sample_output.txt)
 
+**Loom Video:** https://www.loom.com/share/00a6acb9a1614f7d9f8ca1856c251df6
+
 **Original project (Modules 1-3): PawPal+.** The original PawPal+ was a Streamlit app that helped a busy pet owner plan daily care for their pets. The owner entered pets and care tasks (walks, feeding, meds, grooming), each with a duration and priority. A pure-Python scheduler then built a daily plan within the owner's available minutes and explained why each task was included or skipped. This final version keeps that scheduler and adds an AI planning agent, a reliability evaluation, and a redesigned multi-page interface.
 
 ## What it does and why it matters
