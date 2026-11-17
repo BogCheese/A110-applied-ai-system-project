@@ -62,6 +62,7 @@ class Task:
     id: str = field(default_factory=lambda: uuid4().hex)
     completed_on: date | None = None  # the day it was marked done (set by mark_complete)
     spawned_task_id: str | None = None  # id of the next occurrence created when it was completed
+    done_start: int | None = None  # the time slot it held when it was ticked (see Scheduler.complete_task)
 
     @property
     def preferred_end(self) -> int | None:
@@ -94,6 +95,7 @@ class Task:
             completed=False,
             completed_on=None,
             spawned_task_id=None,
+            done_start=None,
             due_date=start_from + timedelta(days=days_until_next),
             id=uuid4().hex,
         )
@@ -128,7 +130,7 @@ class Pet:
             raise ValueError(f"{task.title!r} is not one of {self.name}'s tasks")
 
         # These are managed by the system, so they can't be edited.
-        editable = {f.name for f in fields(Task)} - {"id", "pet_name", "completed_on", "spawned_task_id"}
+        editable = {f.name for f in fields(Task)} - {"id", "pet_name", "completed_on", "spawned_task_id", "done_start"}
         unknown = set(changes) - editable
         if unknown:
             raise ValueError(f"Cannot edit unknown task field(s): {sorted(unknown)}")
@@ -175,6 +177,7 @@ class Pet:
 
         task.completed = False
         task.completed_on = None
+        task.done_start = None
         if task.spawned_task_id is not None:
             spawned = next((t for t in self.tasks if t.id == task.spawned_task_id), None)
             if spawned is not None and not spawned.completed:
@@ -366,9 +369,9 @@ class Scheduler:
         Rules:
         - Tasks come from owner.get_all_tasks(), so every pet is included.
         - Unfinished tasks due on or before plan_date (default: today) are considered.
-        - Tasks finished on plan_date stay on the plan, marked done, in the slot they would
-          have had, so completing a task never makes it vanish from the day. They are placed
-          first and their minutes still count (that time has been spent).
+        - Tasks finished on plan_date stay on the plan, marked done, in the slot they had before
+          they were ticked, so completing a task never moves it or makes it vanish. Their
+          minutes still count (that time has been spent).
         - Greedy: take tasks by priority (high first), then shorter duration,
           then pet order, so the result is repeatable. Tradeoff: one long
           high-priority task can use up time that several smaller ones would fit.
@@ -388,15 +391,19 @@ class Scheduler:
         # Step 1: unfinished tasks that are due, plus tasks finished today (kept, shown as done).
         to_schedule = self.tasks_in_plan(plan_date)
 
-        # Step 2: finished tasks first (they already happened), then highest priority first and
-        # shorter tasks first within a priority. sort() is stable, so ties keep the pet order.
+        # Step 2: finished tasks first (they already happened, and each keeps the slot it held when
+        # it was ticked), then highest priority first and shorter tasks first within a priority.
+        # sort() is stable, so ties keep the pet order.
         to_schedule.sort(key=lambda task: (not task.completed, -task.priority_value(), task.duration_minutes))
 
         # Step 3: place each task if it fits in the time that is left.
         for task in to_schedule:
             if task.completed:
                 # Already done: always keep it on the plan; just record the time it used.
-                chosen = self._choose_start(plan, task, buffer)
+                if task.done_start is not None and self._is_free(plan, task.done_start, task, buffer):
+                    chosen = (task.done_start, "kept the slot it had when it was ticked")
+                else:
+                    chosen = self._choose_start(plan, task, buffer)
                 if chosen is not None:
                     start, placement = chosen
                     plan.add_item(task, start, f"done, {placement}")
@@ -423,6 +430,20 @@ class Scheduler:
             minutes_left -= task.duration_minutes
 
         return plan
+
+    def complete_task(self, pet: Pet, task: Task) -> Task | None:
+        """Mark a task done like Pet.complete_task, remembering the time slot it holds right now.
+
+        The plan is rebuilt around finished tasks, so without this a ticked task could jump to a
+        different time (and push others) just because it was ticked. Recording the slot first
+        means ticking a task never moves it. Returns the next occurrence if the task repeats.
+        """
+        was_done = task.completed
+        item = next((i for i in self.generate_plan().scheduled_items if i.task is task), None)
+        next_task = pet.complete_task(task)  # raises ValueError if the task can't be completed
+        if not was_done and item is not None:
+            task.done_start = item.start_minute
+        return next_task
 
     def explain_plan(self, plan: DailyPlan) -> str:
         """Return a plain-language explanation built from the reasons in the plan."""

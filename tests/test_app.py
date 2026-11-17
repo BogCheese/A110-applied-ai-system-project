@@ -334,14 +334,14 @@ def test_schedule_follows_changes_without_any_click(app):
     assert "Brush" in calendar_html(app) and any("Scheduled 2 task(s)" in s.value for s in app.success)
 
 
-def test_schedule_timeline_shows_busy_time_and_free_time(app):
+def test_schedule_timeline_shows_busy_time_but_no_free_time(app):
     owner = app.session_state.owner
     owner.add_busy_block(9 * 60, 17 * 60)
     owner.pets[0].add_task(Task("Walk", 30, Priority.HIGH, Frequency.ONCE))
     app.run()
     text = page_text(app)
     assert "**8:00 AM – 8:30 AM** · Walk (Nala)" in text
-    assert "Free time" in text and "Busy, no tasks" in text
+    assert "Busy, no tasks" in text and "Free time" not in text
     assert not app.metric  # no summary strip on the page
     assert "List view" in text and "placed at its preferred time" not in text
 

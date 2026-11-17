@@ -10,7 +10,7 @@ import streamlit as st
 
 from calendar_view import render_calendar_html
 from pawpal_agent import describe_context
-from pawpal_system import Frequency, Owner, Priority, Task, format_time
+from pawpal_system import Frequency, Owner, Priority, Scheduler, Task, format_time
 
 # Gap left between consecutive tasks (travel, cleanup, a breather). Not user-editable.
 BUFFER_MINUTES = 5
@@ -27,7 +27,6 @@ PRIORITY_BADGES = {Priority.HIGH: ":red-badge[High]", Priority.MEDIUM: ":orange-
 SPECIES_BADGE_COLORS = {"dog": "blue", "cat": "orange"}  # anything else is gray
 
 # Free gaps shorter than this are not worth listing in the timeline.
-MIN_FREE_GAP_MINUTES = 10
 
 # Night mode. Streamlit can't switch its theme from Python, so this flips the whole page's
 # colours with CSS instead: invert everything, then turn the hues back around so greens stay
@@ -47,6 +46,10 @@ html {
 # ---------------------------------------------------------------------------
 
 
+TIME_HELP = "Click a part (hour, minutes, AM/PM) and type. Press Enter to apply a change."
+TIME_HELP_OPTIONAL = TIME_HELP + " To clear it, click the ✕ or backspace every part and press Enter."
+
+
 def time_picker(label: str, value: int | None, key: str, optional: bool = False) -> int | None:
     """A 12-hour time box (e.g. '8:30 AM') that you can type in or pick from. Returns minutes since midnight.
 
@@ -64,6 +67,7 @@ def time_picker(label: str, value: int | None, key: str, optional: bool = False)
         step=timedelta(minutes=TIME_STEP_MINUTES),
         format="12h",
         required=not optional,
+        help=TIME_HELP_OPTIONAL if optional else TIME_HELP,
     )
     return None if picked is None else picked.hour * 60 + picked.minute
 
@@ -139,8 +143,9 @@ def toggle_done(task_id: str) -> None:
             ticked = st.session_state.get(f"done_{task_id}", task.completed)
             if ticked and not task.completed:
                 try:
-                    # Pet.complete_task also adds the next occurrence if the task repeats.
-                    next_task = pet.complete_task(task)
+                    # Adds the next occurrence if the task repeats, and remembers the task's time slot
+                    # so ticking it never moves it.
+                    next_task = Scheduler(owner).complete_task(pet, task)
                 except ValueError as error:
                     flash(str(error))
                     return
@@ -284,7 +289,13 @@ def build_schedule_view(owner: Owner, plan) -> dict:
                 item.end_minute,
                 # A finished task keeps its place in the list, crossed out (and ticked by its checkbox).
                 (f"~~{label}~~" if item.done else label)
-                + f" · {PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority",
+                + f" · {PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority"
+                # Say so when the task couldn't go at the time it asked for (taken, busy, or no buffer room).
+                + (
+                    f" · ⏱ wanted {format_time(task.preferred_time)}"
+                    if task.preferred_time is not None and task.preferred_time != item.start_minute
+                    else ""
+                ),
                 task,
             )
         )
@@ -293,15 +304,7 @@ def build_schedule_view(owner: Owner, plan) -> dict:
         blocks.append({"kind": "busy", "start": start, "end": end})
     entries.sort(key=lambda entry: entry[:3])
 
-    timeline = []
-    cursor = owner.day_start_minute
-    for start, end, text, task in entries:
-        if start - cursor >= MIN_FREE_GAP_MINUTES:
-            timeline.append((cursor, start, "Free time", None))
-        timeline.append((start, end, text, task))
-        cursor = max(cursor, end)
-    if owner.day_end_minute is not None and owner.day_end_minute - cursor >= MIN_FREE_GAP_MINUTES:
-        timeline.append((cursor, owner.day_end_minute, "Free time", None))
+    timeline = entries
 
     # Tasks that are neither on today's plan nor left out of it (due later, or finished on another day).
     planned_ids = {item.task.id for item in plan.scheduled_items} | {s.task.id for s in plan.skipped_items}

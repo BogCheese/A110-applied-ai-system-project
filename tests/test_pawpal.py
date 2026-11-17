@@ -562,3 +562,27 @@ def test_reopening_a_task_that_is_not_done_does_nothing_and_foreign_tasks_are_re
     assert walk.completed is False and pet.tasks == [walk]
     with pytest.raises(ValueError):
         pet.reopen_task(Task("Other", 5, Priority.LOW))
+
+
+def test_ticking_a_task_does_not_move_it_when_its_preferred_time_did_not_fit():
+    # Playtime wants 5:25 PM, but the buffer before the 5:45 PM task leaves no room, so the plan
+    # puts it in the earliest free slot. Ticking it must keep it there, not jump to 5:25 PM.
+    owner, pet = _owner_with_one_pet(minutes=120)
+    owner.preferences.buffer_minutes = 5
+    pet.add_task(Task("Wet food", 15, Priority.HIGH, preferred_time=17 * 60 + 5))
+    pet.add_task(Task("Litter", 15, Priority.MEDIUM, preferred_time=17 * 60 + 45))
+    play = Task("Playtime", 20, Priority.LOW, preferred_time=17 * 60 + 25)
+    pet.add_task(play)
+    scheduler = Scheduler(owner)
+    before = {i.task.title: i.start_minute for i in scheduler.generate_plan().scheduled_items}
+    assert before["Playtime"] != 17 * 60 + 25
+
+    scheduler.complete_task(pet, play)
+    after = {i.task.title: i.start_minute for i in scheduler.generate_plan().scheduled_items}
+
+    assert after == before
+    scheduler_items = {i.task.title: i for i in scheduler.generate_plan().scheduled_items}
+    assert scheduler_items["Playtime"].done
+
+    pet.reopen_task(play)
+    assert play.done_start is None
