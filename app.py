@@ -98,8 +98,7 @@ def build_schedule_view(owner: Owner, plan) -> dict:
             (
                 item.start_minute,
                 item.end_minute,
-                f"{task.title} ({task.pet_name}) · {PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority"
-                f" — {item.reason.split(', ', 1)[-1]}",
+                f"{task.title} ({task.pet_name}) · {PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority",
             )
         )
     for start, end in owner.busy_blocks:
@@ -142,8 +141,11 @@ def render_schedule(view: dict) -> None:
             f"{view['total_minutes']} of {view['available_minutes']} minutes of task time "
             f"(gaps between tasks aren't counted)."
         )
-        st.html(render_calendar_html(view["blocks"], view["pet_names"], view["day_start"], view["day_end"]))
-        with st.expander("Show as a list"):
+        calendar_col, list_col = st.columns([3, 2])
+        with calendar_col:
+            st.html(render_calendar_html(view["blocks"], view["pet_names"], view["day_start"], view["day_end"]))
+        with list_col:
+            st.markdown("**List view**")
             st.markdown(
                 "\n".join(
                     f"- **{format_time(start)} – {format_time(end)}** · {text}"
@@ -262,15 +264,6 @@ with st.expander("Busy times (optional), e.g. work 9 AM - 5 PM", expanded=bool(o
 # ---------------------------------------------------------------------------
 
 scheduler = Scheduler(owner)
-
-if owner.pets:
-    # A quick overview at the top. Actions below end with st.rerun(), so these are never stale.
-    live_plan = scheduler.generate_plan()
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Pets", len(owner.pets))
-    metric_cols[1].metric("Tasks to do", len([t for t in owner.get_all_tasks() if not t.completed]))
-    metric_cols[2].metric("Scheduled time", f"{live_plan.total_minutes} / {owner.available_minutes} min")
-    metric_cols[3].metric("Conflicts", len(scheduler.detect_conflicts()))
 
 st.header("2. Your pets")
 if not owner.pets:

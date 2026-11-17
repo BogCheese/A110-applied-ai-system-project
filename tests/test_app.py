@@ -69,7 +69,6 @@ def test_first_run_asks_for_a_pet_and_hides_the_rest():
     assert any("Add your first pet" in i.value for i in at.info)
     labels = [b.label for b in at.button]
     assert "Plan with AI" not in labels and "Generate schedule" not in labels
-    assert not at.metric
 
 
 def test_species_choices_are_capitalized():
@@ -97,16 +96,6 @@ def test_every_input_has_a_unique_label(app):
     widgets = [*app.selectbox, *app.text_input, *app.number_input, *app.text_area, *app.radio]
     labels = [w.label for w in widgets]
     assert len(labels) == len(set(labels)), sorted(l for l in labels if labels.count(l) > 1)
-
-
-# ---- summary strip ----
-
-def test_summary_strip_shows_counts(app):
-    app.session_state.owner.pets[0].add_task(Task("Play", 30, Priority.LOW, Frequency.ONCE))
-    app.run()
-    values = {m.label: m.value for m in app.metric}
-    assert values["Pets"] == "1" and values["Tasks to do"] == "1"
-    assert values["Scheduled time"] == "30 / 120 min" and values["Conflicts"] == "0"
 
 
 # ---- AI planner ----
@@ -277,5 +266,8 @@ def test_schedule_is_drawn_as_a_calendar_with_a_list_alternative(app):
     click(app, "Generate schedule")
     html = "\n".join(h.value for h in app.get("html"))
     assert "Day schedule calendar" in html and "Play" in html
-    assert any(e.label == "Show as a list" for e in app.expander)
+    assert not app.metric  # no summary strip on the page
+    text = page_text(app)
+    assert "List view" in text and "Play (Nala)" in text
+    assert "placed at its preferred time" not in text  # the list stays short: no "why" text
     assert any("gaps between tasks aren't counted" in s.value for s in app.success)
