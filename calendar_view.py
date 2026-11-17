@@ -115,14 +115,24 @@ def render_calendar_html(blocks: list[dict], pet_names: list[str], day_start: in
             background, accent = PET_COLORS[pet_index.get(block["pet"], 0) % len(PET_COLORS)]
             icon = PRIORITY_ICONS.get(block["priority"], "")
             priority = f"{icon} {block['priority'].title()} priority"
-            title = escape(block["title"])
-            tooltip = f"{block['title']} ({block['pet']}) {times}, {priority}. {block.get('reason', '')}"
+            done = bool(block.get("done"))
+            # A finished task keeps its place but gets a check mark, a struck-through title and "Done".
+            check = "✓ " if done else ""
+            strike = ' style="text-decoration:line-through"' if done else ""
+            title = f"<strong{strike}>{escape(block['title'])}</strong>"
+            pet = escape(block["pet"])
+            done_note = " · ✓ Done" if done else ""
+            tooltip = (
+                f"{block['title']} ({block['pet']}){' [done]' if done else ''} {times}, {priority}. "
+                f"{block.get('reason', '')}"
+            )
             if compact:
-                body = f"<strong>{title}</strong> · {times}"
+                # Short blocks still name the pet, so you can tell whose task it is at a glance.
+                body = f"{check}{title} ({pet}) · {times}{done_note}"
             else:
                 body = (
-                    f"<strong>{title}</strong> <span style=\"opacity:0.85\">({escape(block['pet'])})</span><br>"
-                    f"<span style=\"font-size:12px\">{times} · {priority}</span>"
+                    f"{check}{title} <span style=\"opacity:0.85\">({pet})</span><br>"
+                    f"<span style=\"font-size:12px\">{times} · {priority}{done_note}</span>"
                 )
 
         parts.append(
