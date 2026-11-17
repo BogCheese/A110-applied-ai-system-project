@@ -41,7 +41,7 @@ Your final app should:
 - **Calendar view.** The schedule is drawn like a calendar: time runs top to bottom, each pet has its own colour, and every block shows its title, time and priority. Long busy stretches such as work are squeezed into a grey band so the rest stays readable, and the same schedule is available as a plain list. The drawing lives in `calendar_view.py` and is tested without a browser.
 - **Time budget.** "Time I can spend on pet care" counts task minutes only. The 5-minute gap between tasks is kept as spacing but is not charged to that budget. The AI is told how many minutes are already used, and when a plan is over budget it is told the total, by how much, and which tasks would be left out.
 - **Accessibility.** Every input has a unique label, delete buttons name what they delete, times use standard 12-hour format, and important text is never in low-contrast caption style. Reviewed against WCAG 2.1 AA; a screen reader pass is still worth doing by hand.
-- **Tested.** 106 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
+- **Tested.** 146 automated tests cover scheduling, busy times, sorting, filtering, recurrence, conflicts, the AI agent, and the Streamlit page itself.
 
 ## Getting started
 
@@ -92,7 +92,7 @@ Using Claude instead: `pip install anthropic` and set `ANTHROPIC_API_KEY`. If bo
 ### Reliability checks
 
 ```bash
-python -m pytest                      # 106 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
+python -m pytest                      # 146 tests; the AI and the Streamlit page are tested with a scripted fake model, no network or key
 python -m evals.run_eval              # offline: 4 scenarios x 3 runs with a scripted model
 python -m evals.run_eval --live --repeats 5   # real model (free Gemini tier is rate limited: use fewer repeats if you hit it): pass rate and consistency
 ```
@@ -118,23 +118,21 @@ This is the generated plan from `python main.py` for an owner with two pets (Bud
 ```
 Today's Schedule
 ----------------
-7:00 AM - 7:10 AM  Flea treatment (Buddy)
-7:15 AM - 7:25 AM  Feed breakfast (Mia)
+7:00 AM - 7:30 AM  Morning walk (Buddy) [done]
 8:00 AM - 8:05 AM  Give medication (Mia)
+8:05 AM - 8:15 AM  Feed breakfast (Mia)
+8:15 AM - 8:25 AM  Flea treatment (Buddy)
 12:00 PM - 12:20 PM  Play with laser (Mia)
 6:00 PM - 6:15 PM  Brush coat (Buddy)
-Total: 60 minutes
-
-Skipped:
-- Morning walk (Buddy)
+Total: 90 minutes
 
 Why this plan:
-- Flea treatment: medium priority, placed at its preferred time 7:00 AM
-- Feed breakfast: high priority, placed at its preferred time 7:15 AM
+- Morning walk: done, placed at its preferred time 7:00 AM
 - Give medication: high priority, placed at its preferred time 8:00 AM
+- Feed breakfast: high priority, preferred time was taken or unavailable, placed in the next free slot
+- Flea treatment: medium priority, preferred time was taken or unavailable, placed in the next free slot
 - Play with laser: medium priority, placed at its preferred time 12:00 PM
 - Brush coat: low priority, placed at its preferred time 6:00 PM
-- Morning walk (skipped): already completed
 ```
 
 ## 🧪 Testing PawPal+
@@ -152,7 +150,9 @@ The 26 tests in `tests/test_pawpal.py` cover:
 - **Filtering:** by pet, by completion status, and by both, plus an unknown pet returning nothing.
 - **Recurring tasks:** a daily task creates a copy due tomorrow, a weekly task one due in 7 days, a one-time task creates nothing, a late completion is still due tomorrow, and completing the same task twice doesn't duplicate it.
 - **Conflict detection:** same-time and overlapping tasks (same pet and different pets) are flagged, back-to-back, completed, and untimed tasks are not, and three tasks at one time give three warnings.
-- **Scheduling:** priority order, skipping tasks that don't fit or are already completed, ignoring tasks not due yet, moving a clashing task to the next free slot, and empty cases (no pets, a pet with no tasks).
+- **Scheduling:** priority order, skipping tasks that don't fit, ignoring tasks not due yet, moving a clashing task to the next free slot, and empty cases (no pets, a pet with no tasks).
+- **Finished tasks:** a task finished today stays on the plan in its slot marked done (and its minutes still count), so completing a task never makes it vanish or shifts the rest of the day; a task finished on an earlier day is not shown.
+- **No endless copies:** a task that isn't due yet can't be marked done, so a daily task can't be completed over and over to create more copies; finishing a task can be undone, which also removes the copy it created.
 
 Output of a successful run:
 
@@ -196,7 +196,7 @@ All 26 tests pass, and they cover the main behaviors and the edge cases I could 
 
 ### Recurring tasks
 
-Each `Task` has a `frequency` (`ONCE`, `DAILY`, or `WEEKLY`) and a `due_date`. `Task.mark_complete()` marks the task done and, for a repeating task, returns a copy that is not completed and is due today + 1 day (daily) or today + 7 days (weekly), calculated with `timedelta`. `Pet.complete_task(task)` calls it and adds the new task to the pet. `generate_plan()` only includes tasks due on or before the plan date, so tomorrow's copy stays out of today's schedule.
+Each `Task` has a `frequency` (`ONCE`, `DAILY`, or `WEEKLY`) and a `due_date`. `Task.mark_complete()` marks the task done and, for a repeating task, returns a copy that is not completed and is due 1 day (daily) or 7 days (weekly) after the later of today and the task's own due date, so a finished task can never create a copy due the same day. `Pet.complete_task(task)` calls it and adds the new task to the pet; it refuses a task that isn't due yet. `Pet.reopen_task(task)` undoes a completion and removes the copy it created. `generate_plan()` includes unfinished tasks due on or before the plan date, plus tasks finished that day (kept in their slot and shown as done), so tomorrow's copy stays out of today's schedule.
 
 ## 📸 Demo Walkthrough
 
@@ -204,13 +204,13 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 
 ### What you can do in the app
 
-- **Owner:** set your name and how many minutes you have available today.
-- **Pets:** add a pet with a name and species. A table lists your pets and how many tasks each has.
-- **Tasks:** pick a pet, then give the task a title, duration, priority, frequency (once, daily, or weekly), and an optional preferred time.
-- **Your tasks:** see all tasks in a table sorted by time, and filter it by pet and by status (all, to do, done).
-- **Conflict warnings:** if two tasks' preferred times overlap, an orange warning names both tasks and tells you how to fix it. A green message appears when there are no conflicts.
-- **Mark a task complete:** finish a task, and if it repeats the app tells you when the next one is due.
-- **Build Schedule:** generate today's plan, with a summary, a table of start and end times with the reason for each, and a list of tasks that were left out.
+- **Your day:** set how many minutes you can spend, when your day starts (and optionally ends), and busy times like work.
+- **Your pets:** add a pet with a name and species. Each pet is a card with its task counts and a delete button (with a confirmation).
+- **Plan with AI:** describe a goal and the AI adds tasks, checked against your schedule.
+- **Today's schedule:** a calendar and a list, rebuilt automatically. Every block names its pet. Tasks you finish stay in place with a check mark, a struck-through title and "Done".
+- **Your tasks:** tasks grouped by pet, in time order, with coloured priority badges, filtered by status (all, to do, done).
+- **Conflict warnings:** if two tasks' preferred times overlap, a warning names both tasks and tells you how to fix it.
+- **Manage tasks:** add a task (a blank title is refused), mark a task done (only tasks that are due are offered, and finishing a repeating one creates tomorrow's copy), undo a task marked done by mistake, or edit and delete a task.
 
 ### Example workflow
 
@@ -219,7 +219,7 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 3. Add a "Walk" for Buddy (30 min, high priority, daily, 9:00 AM) and "Meds" for Mia (10 min, high priority, once, 9:00 AM).
 4. Look at the task table, which is sorted by time. A conflict warning appears because both tasks want 9:00 AM.
 5. Look at today's schedule (it updates by itself). Meds (shorter, so it goes first) keeps 9:00 AM, and Walk moves to the earliest free slot at 8:00 AM. Hover a block on the calendar to see why it was placed there.
-6. Select "Walk" under **Mark a task complete**. Because it is daily, the app creates tomorrow's Walk and the conflict goes away for today.
+6. Open **Mark done** under Manage tasks and mark "Walk" done. It stays on today's schedule with a check mark, and because it is daily the app creates tomorrow's Walk. Marked it by mistake? Use **Mark not done** and the copy is taken back.
 
 ### Scheduler behaviors shown
 
@@ -227,7 +227,7 @@ Start the app with `streamlit run app.py`. You can also try the logic without th
 - **Conflict warnings:** overlapping tasks are flagged for the same pet and across pets, without crashing.
 - **Priority and time budget:** higher-priority tasks are scheduled first, and tasks that don't fit are skipped with a reason.
 - **Preferred time fallback:** a task that loses its slot is moved to the next free one.
-- **Recurrence:** completing a daily task adds a copy due tomorrow, which stays out of today's plan.
+- **Recurrence:** completing a daily task adds a copy due tomorrow, which stays out of today's plan and can't itself be completed until it is due.
 - **Filtering:** tasks can be narrowed to one pet or to done or unfinished tasks.
 
 ### Sample CLI output
@@ -239,48 +239,46 @@ Owner: Jordan (120 minutes available)
 Pets: Buddy, Mia
 
 Tasks sorted by time:
-    7:00 AM  Morning walk (Buddy) [to do, due 2026-10-25]
-    7:00 AM  Flea treatment (Buddy) [to do, due 2026-10-25]
-    7:15 AM  Feed breakfast (Mia) [to do, due 2026-10-25]
-    8:00 AM  Give medication (Mia) [to do, due 2026-10-25]
-   12:00 PM  Play with laser (Mia) [to do, due 2026-10-25]
-    6:00 PM  Brush coat (Buddy) [to do, due 2026-10-25]
+    7:00 AM  Morning walk (Buddy) [to do, due 2026-11-16]
+    7:00 AM  Flea treatment (Buddy) [to do, due 2026-11-16]
+    7:15 AM  Feed breakfast (Mia) [to do, due 2026-11-16]
+    8:00 AM  Give medication (Mia) [to do, due 2026-11-16]
+   12:00 PM  Play with laser (Mia) [to do, due 2026-11-16]
+    6:00 PM  Brush coat (Buddy) [to do, due 2026-11-16]
 
 Conflict check:
   Conflict: Morning walk (Buddy, 7:00 AM-7:30 AM) overlaps Flea treatment (Buddy, 7:00 AM-7:10 AM)
   Conflict: Morning walk (Buddy, 7:00 AM-7:30 AM) overlaps Feed breakfast (Mia, 7:15 AM-7:25 AM)
 
-Completed 'Morning walk'; next one is due 2026-10-26.
+Completed 'Morning walk'; next one is due 2026-11-17.
 
 Mia's tasks:
-   12:00 PM  Play with laser (Mia) [to do, due 2026-10-25]
-    8:00 AM  Give medication (Mia) [to do, due 2026-10-25]
-    7:15 AM  Feed breakfast (Mia) [to do, due 2026-10-25]
+   12:00 PM  Play with laser (Mia) [to do, due 2026-11-16]
+    8:00 AM  Give medication (Mia) [to do, due 2026-11-16]
+    7:15 AM  Feed breakfast (Mia) [to do, due 2026-11-16]
 
 Completed tasks:
-    7:00 AM  Morning walk (Buddy) [done, due 2026-10-25]
+    7:00 AM  Morning walk (Buddy) [done, due 2026-11-16]
 
 Today's Schedule
 ----------------
-7:00 AM - 7:10 AM  Flea treatment (Buddy)
-7:15 AM - 7:25 AM  Feed breakfast (Mia)
+7:00 AM - 7:30 AM  Morning walk (Buddy) [done]
 8:00 AM - 8:05 AM  Give medication (Mia)
+8:05 AM - 8:15 AM  Feed breakfast (Mia)
+8:15 AM - 8:25 AM  Flea treatment (Buddy)
 12:00 PM - 12:20 PM  Play with laser (Mia)
 6:00 PM - 6:15 PM  Brush coat (Buddy)
-Total: 60 minutes
-
-Skipped:
-- Morning walk (Buddy)
+Total: 90 minutes
 
 Why this plan:
-- Flea treatment: medium priority, placed at its preferred time 7:00 AM
-- Feed breakfast: high priority, placed at its preferred time 7:15 AM
+- Morning walk: done, placed at its preferred time 7:00 AM
 - Give medication: high priority, placed at its preferred time 8:00 AM
+- Feed breakfast: high priority, preferred time was taken or unavailable, placed in the next free slot
+- Flea treatment: medium priority, preferred time was taken or unavailable, placed in the next free slot
 - Play with laser: medium priority, placed at its preferred time 12:00 PM
 - Brush coat: low priority, placed at its preferred time 6:00 PM
-- Morning walk (skipped): already completed
 ```
 
-In this run the morning walk was completed before the schedule was built, so it is skipped as "already completed", and tomorrow's copy is not part of today's plan.
+In this run the morning walk was completed before the schedule was built, so it stays on the plan in its 7:00 AM slot marked `[done]` (its minutes still count), and tomorrow's copy is not part of today's plan.
 
 **Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->

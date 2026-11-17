@@ -60,3 +60,35 @@ def test_day_end_extends_the_grid():
 def test_task_before_day_start_is_still_drawn():
     html = render_calendar_html([task(420, 440, "Early meds")], ["Nala"], 480, None)
     assert "Early meds" in html and ">7 AM<" in html
+
+
+# ---- pet names on every block, and finished tasks ----
+
+def test_short_blocks_still_show_the_pet_name():
+    """A 5-minute block is too short for two lines; it used to show the bare title with no pet."""
+    html = render_calendar_html([task(480, 485, "Quick meds", pet="Nala")], ["Nala"], 480, None)
+    assert "Quick meds</strong> (Nala)" in html
+
+
+def test_every_block_size_names_the_pet():
+    short = render_calendar_html([task(480, 485, "A", pet="Mocha")], ["Nala", "Mocha"], 480, None)
+    tall = render_calendar_html([task(480, 600, "B", pet="Mocha")], ["Nala", "Mocha"], 480, None)
+    assert "(Mocha)" in short and "(Mocha)" in tall
+
+
+def test_done_task_is_struck_through_with_a_check_and_the_word_done():
+    done = {**task(480, 510, "Feed", pet="Nala"), "done": True}
+    html = render_calendar_html([done], ["Nala"], 480, None)
+    assert "✓ " in html and "line-through" in html and "✓ Done" in html
+    assert "[done]" in html  # also in the hover text
+
+
+def test_unfinished_task_has_no_check_or_strike():
+    html = render_calendar_html([task(480, 510, "Feed")], ["Nala"], 480, None)
+    assert "✓" not in html and "line-through" not in html
+
+
+def test_done_short_block_keeps_pet_check_and_done_label():
+    done = {**task(480, 485, "Meds", pet="Nala"), "done": True}
+    html = render_calendar_html([done], ["Nala"], 480, None)
+    assert "✓ " in html and "(Nala)" in html and "Done" in html

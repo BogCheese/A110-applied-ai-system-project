@@ -111,14 +111,18 @@ def build_schedule_view(owner: Owner, plan) -> dict:
                 "pet": task.pet_name,
                 "priority": task.priority.name.lower(),
                 "reason": item.reason.split(", ", 1)[-1],
+                "done": item.done,
             }
         )
         entries.append(
             (
                 item.start_minute,
                 item.end_minute,
-                f"{md_escape(task.title)} ({md_escape(task.pet_name)}) · "
-                f"{PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority",
+                # A finished task keeps its place in the list too, with a check mark.
+                ("✅ " if item.done else "")
+                + f"{md_escape(task.title)} ({md_escape(task.pet_name)}) · "
+                f"{PRIORITY_ICONS[task.priority]} {task.priority.name.title()} priority"
+                + (" · done" if item.done else ""),
             )
         )
     for start, end in owner.busy_blocks:
@@ -138,6 +142,7 @@ def build_schedule_view(owner: Owner, plan) -> dict:
 
     return {
         "scheduled_count": len(plan.scheduled_items),
+        "done_count": len([item for item in plan.scheduled_items if item.done]),
         "total_minutes": plan.total_minutes,
         "available_minutes": owner.available_minutes,
         "timeline": timeline,
@@ -145,10 +150,7 @@ def build_schedule_view(owner: Owner, plan) -> dict:
         "pet_names": [pet.name for pet in owner.pets],
         "day_start": owner.day_start_minute,
         "day_end": owner.day_end_minute,
-        # Finished tasks aren't "left out", so they are not listed.
-        "skipped": [
-            (s.task.title, s.task.pet_name, s.reason) for s in plan.skipped_items if s.reason != "already completed"
-        ],
+        "skipped": [(s.task.title, s.task.pet_name, s.reason) for s in plan.skipped_items],
     }
 
 
@@ -156,8 +158,9 @@ def render_schedule(view: dict) -> None:
     """Draw a schedule: a calendar of time blocks, with the same thing as a plain list beside it."""
     if view["scheduled_count"]:
         st.success(
-            f"Scheduled {view['scheduled_count']} task(s) using "
-            f"{view['total_minutes']} of {view['available_minutes']} minutes of task time "
+            f"Scheduled {view['scheduled_count']} task(s)"
+            + (f" ({view['done_count']} done)" if view["done_count"] else "")
+            + f" using {view['total_minutes']} of {view['available_minutes']} minutes of task time "
             f"(gaps between tasks aren't counted)."
         )
         calendar_col, list_col = st.columns([3, 2], gap="large")
@@ -540,13 +543,23 @@ with add_tab:
         add_task_clicked = st.form_submit_button("Add task", icon=":material/add:")
 
     if add_task_clicked:
-        # Pet.add_task stores the Task on the selected pet (and records the pet's name on it).
-        selected_pet.add_task(Task(task_title, int(duration), priority, frequency, preferred_time=preferred_time))
-        flash(f"Added '{task_title}' for {selected_pet.name}.")
-        st.rerun()
+        clean_title = task_title.strip()
+        if not clean_title:
+            st.warning("Please give the task a title.")
+        else:
+            # Pet.add_task stores the Task on the selected pet (and records the pet's name on it).
+            selected_pet.add_task(Task(clean_title, int(duration), priority, frequency, preferred_time=preferred_time))
+            flash(f"Added '{clean_title}' for {selected_pet.name}.")
+            st.rerun()
 
 with done_tab:
-    pending = [(pet, task) for pet in owner.pets for task in pet.tasks if not task.completed]
+    today = date.today()
+    # Only tasks that are due can be marked done. A repeating task's next copy (due tomorrow)
+    # is not offered, otherwise it could be completed over and over, creating endless copies.
+    pending = [
+        (pet, task) for pet in owner.pets for task in pet.tasks if not task.completed and task.due_date <= today
+    ]
+    upcoming = [task for task in owner.get_all_tasks() if not task.completed and task.due_date > today]
     if pending:
         pending_index = st.selectbox(
             "Task to mark done",
@@ -555,18 +568,39 @@ with done_tab:
         )
         if st.button("Mark complete", icon=":material/check:"):
             pet, task = pending[pending_index]
-            # Pet.complete_task also adds the next occurrence if the task repeats.
-            next_task = pet.complete_task(task)
-            if next_task:
-                flash(
-                    f"Done! '{task.title}' repeats {task.frequency.value}, "
-                    f"next one is due {next_task.due_date:%b %d}."
-                )
+            try:
+                # Pet.complete_task also adds the next occurrence if the task repeats.
+                next_task = pet.complete_task(task)
+            except ValueError as error:
+                st.warning(str(error))
             else:
-                flash(f"Done! '{task.title}' is complete.")
-            st.rerun()
+                if next_task:
+                    flash(
+                        f"Done! '{task.title}' repeats {task.frequency.value}, "
+                        f"next one is due {next_task.due_date:%b %d}."
+                    )
+                else:
+                    flash(f"Done! '{task.title}' is complete.")
+                st.rerun()
     else:
-        st.markdown("Nothing left to do. 🎉")
+        st.markdown("Nothing due right now. 🎉" + (" Upcoming tasks can be marked done on the day they are due." if upcoming else ""))
+
+    # Undo: a done task stays on the schedule with a check mark, and can be put back.
+    finished = [
+        (pet, task) for pet in owner.pets for task in pet.tasks if scheduler.finished_on(task, today)
+    ]
+    if finished:
+        st.markdown("**Marked something done by mistake?**")
+        undo_index = st.selectbox(
+            "Task to mark not done",
+            range(len(finished)),
+            format_func=lambda i: f"{finished[i][1].title} ({finished[i][0].name})",
+        )
+        if st.button("Mark not done", icon=":material/undo:"):
+            pet, task = finished[undo_index]
+            pet.reopen_task(task)  # also takes back the next copy that completing it created
+            flash(f"'{task.title}' is back on your to-do list.")
+            st.rerun()
 
 with edit_tab:
     all_tasks = [(pet, task) for pet in owner.pets for task in pet.tasks]
