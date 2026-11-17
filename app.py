@@ -188,7 +188,7 @@ with st.expander("How PawPal+ works", expanded=False):
 # ---------------------------------------------------------------------------
 
 st.header("1. Your day")
-owner.name = st.text_input("Owner name", value=owner.name, placeholder="Owner Name")
+owner.name = st.text_input("Owner name", value=owner.name, placeholder="Pet Owner")
 owner.available_minutes = int(
     st.number_input(
         "Time I can spend on pet care today (minutes)",
