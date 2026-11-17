@@ -378,3 +378,23 @@ def test_busy_block_validation_and_removal():
     assert owner.busy_blocks == [(540, 600), (900, 1000)]  # kept in time order
     owner.remove_busy_block((540, 600))
     assert owner.busy_blocks == [(900, 1000)]
+
+
+# ---- the gap between tasks is spacing, not part of the time budget ----
+
+def test_buffer_does_not_use_up_available_minutes():
+    owner, pet = _owner_with_one_pet(minutes=30)
+    owner.preferences.buffer_minutes = 5
+    pet.add_task(Task("A", 15, Priority.HIGH))
+    pet.add_task(Task("B", 15, Priority.HIGH))  # 15 + 15 = 30 minutes of tasks: exactly the budget
+    plan = Scheduler(owner).generate_plan()
+    assert len(plan.scheduled_items) == 2 and plan.skipped_items == []
+    first, second = plan.scheduled_items
+    assert second.start_minute - first.end_minute >= 5  # the gap is still kept as spacing
+
+
+def test_skip_reason_names_the_owners_total_minutes():
+    owner, pet = _owner_with_one_pet(minutes=20)
+    pet.add_task(Task("Long hike", 30, Priority.HIGH))
+    reason = Scheduler(owner).generate_plan().skipped_items[0].reason
+    assert "needs 30 min but only 20 min left of your 20 minutes" in reason

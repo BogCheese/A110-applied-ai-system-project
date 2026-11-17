@@ -87,6 +87,7 @@ def test_llm_crash_becomes_agent_error(owner):
 def test_existing_conflicts_are_not_blamed_on_agent(owner):
     from pawpal_system import Task
 
+    owner.available_minutes = 120  # room for the two old tasks plus the new one
     owner.pets[0].add_task(Task("Old A", 30, Priority.LOW, preferred_time=600))
     owner.pets[0].add_task(Task("Old B", 30, Priority.LOW, preferred_time=610))
     result = PlannerAgent(FakeLLM(reply(("Mia", "Feeding", 10, "high", "daily", "08:00")))).run(owner, "plan")
@@ -272,3 +273,30 @@ def test_context_mentions_the_buffer_only_when_set(owner):
     assert "between tasks" not in describe_context(owner)
     owner.preferences.buffer_minutes = 5
     assert "Leave at least 5 minute(s) between tasks" in describe_context(owner)
+
+
+def test_total_over_budget_is_reported_once_with_the_numbers(owner):
+    over = reply(("Mia", "Walk", 40, "high", "once", None), ("Mia", "Play", 40, "low", "once", None))  # 80 > 60
+    llm = FakeLLM(over, reply(("Mia", "Walk", 40, "high", "once", None), ("Mia", "Play", 15, "low", "once", None)))
+    result = PlannerAgent(llm).run(owner, "plan")
+    feedback = llm.calls[1][-1]["content"]
+    assert "All tasks together take 80 min but the owner only has 60 min (over by 20)" in feedback
+    assert feedback.count("does not fit") == 0  # not repeated per task
+    assert result.success
+
+
+def test_existing_task_pushed_out_by_new_tasks_is_reported(owner):
+    owner.available_minutes = 60
+    owner.pets[0].add_task(Task("Old grooming", 30, Priority.LOW))
+    llm = FakeLLM(reply(("Mia", "Big walk", 45, "high", "once", None)), reply(("Mia", "Walk", 20, "high", "once", None)))
+    result = PlannerAgent(llm).run(owner, "plan")
+    assert result.attempts == 2 and result.success
+    assert "Old grooming" in llm.calls[1][-1]["content"]
+
+
+def test_context_tells_the_model_how_many_minutes_are_left(owner):
+    from pawpal_agent import describe_context
+
+    owner.pets[0].add_task(Task("Feeding", 25, Priority.HIGH))
+    text = describe_context(owner)
+    assert "already use 25 of those minutes, so 35 minutes remain" in text

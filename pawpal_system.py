@@ -338,6 +338,8 @@ class Scheduler:
           otherwise it goes in the earliest free slot after owner.day_start_minute.
         - Nothing is placed past owner.day_end_minute (if set) or inside a busy block;
           a task with no such slot is skipped with a reason.
+        - Only task minutes count against owner.available_minutes; the buffer between
+          tasks is enforced as spacing but is not charged to that budget.
         - Every task ends up either scheduled or skipped, each with a reason.
         """
         plan_date = plan_date or date.today()
@@ -361,11 +363,13 @@ class Scheduler:
 
         # Step 3: place each task if it fits in the time that is left.
         for task in to_schedule:
-            time_needed = task.duration_minutes + buffer
-            if time_needed > minutes_left:
+            # Only the task's own minutes count against the owner's available time. The
+            # gap between tasks is spacing, not time spent on care, so it is not charged.
+            if task.duration_minutes > minutes_left:
                 plan.skip(
                     task,
-                    f"needs {time_needed} min but only {minutes_left} min left",
+                    f"needs {task.duration_minutes} min but only {minutes_left} min left "
+                    f"of your {self.owner.available_minutes} minutes",
                 )
                 continue
 
@@ -376,7 +380,7 @@ class Scheduler:
             start, placement = chosen
             reason = f"{task.priority.name.lower()} priority, {placement}"
             plan.add_item(task, start, reason)
-            minutes_left -= time_needed
+            minutes_left -= task.duration_minutes
 
         return plan
 

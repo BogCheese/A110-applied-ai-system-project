@@ -354,9 +354,13 @@ def describe_context(owner: Owner) -> str:
         busy = f" The owner is busy (no tasks possible) during: {blocks}."
     buffer = owner.preferences.buffer_minutes
     gap = f" Leave at least {buffer} minute(s) between tasks." if buffer else ""
+    used = sum(t.duration_minutes for t in owner.get_all_tasks() if not t.completed and t.due_date <= date.today())
+    left = max(0, owner.available_minutes - used)
     return (
         "Pets:\n" + "\n".join(pet_lines) + "\n\n"
-        f"Owner has {owner.available_minutes} minutes available per day and {day}.{gap}{busy}"
+        f"Owner has {owner.available_minutes} minutes available per day for task time and {day}.{gap}{busy} "
+        f"Existing tasks already use {used} of those minutes, so {left} minutes remain for new tasks "
+        "(the total of all task durations must stay within the owner's minutes)."
     )
 
 
@@ -508,6 +512,7 @@ class PlannerAgent:
         """Dry-run the specs on a copy of the owner and report problems the new tasks cause."""
         trial = copy.deepcopy(owner)
         baseline = set(Scheduler(trial).detect_conflicts())
+        baseline_skipped = {s.task.id for s in Scheduler(trial).generate_plan().skipped_items}
 
         new_tasks = []
         for spec in specs:
@@ -549,12 +554,41 @@ class PlannerAgent:
             if owner.day_end_minute is not None and end > owner.day_end_minute:
                 problems.append(f"{label} runs past the day end at {format_time(owner.day_end_minute)}")
 
+        # Total task time vs the owner's minutes: say it once, with the numbers, instead of
+        # repeating "needs X but only Y left" for every task that got squeezed out.
+        total = sum(t.duration_minutes for t in trial.get_all_tasks() if scheduler._is_pending(t, date.today()))
+        over_budget = total > owner.available_minutes
         plan = scheduler.generate_plan()
+
+        def blamed(skipped) -> bool:
+            """True if this skipped task is new, or was fitting before the new tasks arrived."""
+            return skipped.reason != "already completed" and (
+                skipped.task.id in new_ids or skipped.task.id not in baseline_skipped
+            )
+
+        if over_budget:
+            dropped = [
+                f"'{s.task.title}' ({s.task.pet_name})"
+                for s in plan.skipped_items
+                if blamed(s) and s.reason.startswith("needs")
+            ]
+            problems.append(
+                f"All tasks together take {total} min but the owner only has {owner.available_minutes} min "
+                f"(over by {total - owner.available_minutes}). Shorten tasks or drop the lowest-priority ones."
+                + (f" As it stands these would be left out: {', '.join(dropped)}." if dropped else "")
+            )
+
         for skipped in plan.skipped_items:
-            if skipped.task.id in new_ids:
-                problems.append(
-                    f"'{skipped.task.title}' ({skipped.task.pet_name}) does not fit: {skipped.reason}"
-                )
+            if not blamed(skipped):
+                continue  # finished, or already left out before the new tasks, not the agent's doing
+            is_new = skipped.task.id in new_ids
+            if over_budget and skipped.reason.startswith("needs"):
+                continue  # covered by the total above
+            who = f"'{skipped.task.title}' ({skipped.task.pet_name})"
+            if is_new:
+                problems.append(f"{who} does not fit: {skipped.reason}")
+            else:
+                problems.append(f"{who} (already on the list) no longer fits because of the new tasks: {skipped.reason}")
         return problems
 
     @staticmethod
