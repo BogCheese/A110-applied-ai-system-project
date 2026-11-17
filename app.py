@@ -147,7 +147,7 @@ def set_goal(text: str) -> None:
 # Page setup
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered", initial_sidebar_state="expanded")
+st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 # Streamlit re-runs this whole script on every click, so a plain `owner = Owner(...)`
 # would be recreated empty each time. st.session_state is a dictionary that survives
@@ -158,49 +158,6 @@ if "owner" not in st.session_state:
     )
 
 owner = st.session_state.owner
-
-# ---------------------------------------------------------------------------
-# Sidebar: your day (time, day hours, busy times)
-# ---------------------------------------------------------------------------
-
-with st.sidebar:
-    st.header("Your day")
-    owner.available_minutes = int(
-        st.number_input(
-            "Time I can spend on pet care today (minutes)",
-            min_value=1,
-            max_value=1440,
-            value=owner.available_minutes,
-            help="The total minutes you can give. Tasks must fit within this and within your day hours.",
-        )
-    )
-    owner.day_start_minute = time_picker("Day starts at", owner.day_start_minute, key="day_start")
-    day_end = time_picker("Day ends at (optional)", owner.day_end_minute, key="day_end", none_label="No end time")
-    if day_end is not None and day_end <= owner.day_start_minute:
-        owner.day_end_minute = None
-        st.warning("The day must end after it starts.")
-    else:
-        owner.day_end_minute = day_end
-
-    st.subheader("Busy times")
-    st.markdown(
-        "Optional, e.g. work 9 AM - 5 PM. No tasks are scheduled during a busy time, "
-        "and the AI planner avoids them too."
-    )
-    with st.form("add_busy_form"):
-        busy_start = time_picker("Busy from", 9 * 60, key="busy_start")
-        busy_end = time_picker("Busy until", 17 * 60, key="busy_end")
-        add_busy_clicked = st.form_submit_button("Add busy time")
-    if add_busy_clicked:
-        try:
-            owner.add_busy_block(busy_start, busy_end)
-        except ValueError as error:
-            st.warning(str(error))
-    for block in list(owner.busy_blocks):
-        label = f"Delete busy time {format_time(block[0])} - {format_time(block[1])}"
-        if st.button(label, key=f"remove_busy_{block[0]}_{block[1]}", use_container_width=True):
-            owner.remove_busy_block(block)
-            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Header
@@ -216,7 +173,7 @@ show_flashes()
 with st.expander("How PawPal+ works", expanded=False):
     st.markdown(
         """
-1. Set your day in the sidebar: how many minutes you have, when your day starts (and optionally ends), and any busy times like work.
+1. Set up your day: how many minutes you have, when your day starts (and optionally ends), and any busy times like work.
 2. Add your pets.
 3. Describe what you need and the **AI planner** adds tasks for you, or add tasks by hand.
 4. Tasks are listed in time order, with a warning if two tasks' preferred times overlap.
@@ -227,7 +184,56 @@ with st.expander("How PawPal+ works", expanded=False):
     )
 
 # ---------------------------------------------------------------------------
-# 1. Pets
+# 1. Your day
+# ---------------------------------------------------------------------------
+
+st.header("1. Your day")
+owner.name = st.text_input("Owner name", value=owner.name)
+owner.available_minutes = int(
+    st.number_input(
+        "Time I can spend on pet care today (minutes)",
+        min_value=1,
+        max_value=1440,
+        value=owner.available_minutes,
+        help="The total minutes you can give. Tasks must fit within this and within your day hours.",
+    )
+)
+
+start_col, end_col = st.columns(2)
+with start_col:
+    owner.day_start_minute = time_picker("Day starts at", owner.day_start_minute, key="day_start")
+with end_col:
+    day_end = time_picker("Day ends at (optional)", owner.day_end_minute, key="day_end", none_label="No end time")
+if day_end is not None and day_end <= owner.day_start_minute:
+    owner.day_end_minute = None
+    st.warning("The day must end after it starts.")
+else:
+    owner.day_end_minute = day_end
+
+with st.expander("Busy times (optional), e.g. work 9 AM - 5 PM", expanded=bool(owner.busy_blocks)):
+    st.markdown(
+        "No tasks are scheduled during a busy time, and the AI planner avoids them too."
+    )
+    with st.form("add_busy_form"):
+        busy_start_col, busy_end_col = st.columns(2)
+        with busy_start_col:
+            busy_start = time_picker("Busy from", 9 * 60, key="busy_start")
+        with busy_end_col:
+            busy_end = time_picker("Busy until", 17 * 60, key="busy_end")
+        add_busy_clicked = st.form_submit_button("Add busy time")
+    if add_busy_clicked:
+        try:
+            owner.add_busy_block(busy_start, busy_end)
+        except ValueError as error:
+            st.warning(str(error))
+    for block in list(owner.busy_blocks):
+        label = f"Delete busy time {format_time(block[0])} - {format_time(block[1])}"
+        if st.button(label, key=f"remove_busy_{block[0]}_{block[1]}"):
+            owner.remove_busy_block(block)
+            st.rerun()
+
+# ---------------------------------------------------------------------------
+# 2. Pets
 # ---------------------------------------------------------------------------
 
 scheduler = Scheduler(owner)
@@ -241,7 +247,7 @@ if owner.pets:
     metric_cols[2].metric("Scheduled time", f"{live_plan.total_minutes} / {owner.available_minutes} min")
     metric_cols[3].metric("Conflicts", len(scheduler.detect_conflicts()))
 
-st.header("1. Your pets")
+st.header("2. Your pets")
 if not owner.pets:
     st.info("👋 Add your first pet to get started. Then you can plan their care with AI or add tasks by hand.")
 
@@ -267,16 +273,16 @@ else:
     st.stop()  # nothing else is useful until there is a pet
 
 # ---------------------------------------------------------------------------
-# 2. AI planner
+# 3. AI planner
 # ---------------------------------------------------------------------------
 
-st.header("2. Plan with AI")
+st.header("3. Plan with AI")
 st.markdown(
     "Describe a goal and the AI proposes tasks for your pets. PawPal+ then checks them for time "
     "conflicts and available minutes, and sends any problems back to the AI to fix before adding anything."
 )
 with st.container(border=True):
-    st.markdown("**The AI is automatically given this about you** (change it in the sidebar or your pets):")
+    st.markdown("**The AI is automatically given this about you** (change it in the sections above):")
     st.markdown(context_markdown(owner))
 
 first_pet = owner.pets[0].name
@@ -294,7 +300,7 @@ goal = st.text_area(
     key="planner_goal",
     placeholder="I just adopted a puppy, set up a daily care routine.",
 )
-if st.button("Plan with AI", type="primary"):
+if st.button("Plan with AI", icon=":material/auto_awesome:", use_container_width=True):
     try:
         with st.spinner("Planning, checking, and revising..."):
             result = PlannerAgent(make_client()).run(owner, goal)
@@ -327,10 +333,10 @@ if agent_result:
             st.write(f"**{step.kind}**: {step.detail}")
 
 # ---------------------------------------------------------------------------
-# 3. Tasks
+# 4. Tasks
 # ---------------------------------------------------------------------------
 
-st.header("3. Your tasks")
+st.header("4. Your tasks")
 
 if owner.get_all_tasks():
     filter_pet_col, filter_status_col = st.columns(2)
@@ -498,13 +504,13 @@ with edit_tab:
         st.markdown("No tasks to edit yet.")
 
 # ---------------------------------------------------------------------------
-# 4. Schedule
+# 5. Schedule
 # ---------------------------------------------------------------------------
 
-st.header("4. Today's schedule")
+st.header("5. Today's schedule")
 st.markdown("Builds today's plan from every pet's tasks: highest priority first, within your available time.")
 
-if st.button("Generate schedule", type="primary"):
+if st.button("Generate schedule", icon=":material/event_available:", use_container_width=True):
     st.session_state.schedule = build_schedule_view(owner, scheduler.generate_plan())
 
 saved_schedule = st.session_state.get("schedule")

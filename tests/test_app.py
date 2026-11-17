@@ -261,3 +261,10 @@ def test_schedule_timeline_shows_busy_time_and_free_time(app):
     text = page_text(app)
     assert "**8:00 AM – 8:30 AM** · Walk (Nala)" in text
     assert "Free time" in text and "Busy, no tasks" in text
+
+
+def test_no_sidebar_and_owner_name_is_editable(app):
+    assert len(app.sidebar) == 0  # everything lives on the main page
+    name_box = [t for t in app.text_input if t.label == "Owner name"][0]
+    name_box.set_value("Brandon").run()
+    assert app.session_state.owner.name == "Brandon"
